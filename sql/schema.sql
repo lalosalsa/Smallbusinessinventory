@@ -49,21 +49,35 @@ CREATE TABLE IF NOT EXISTS member_locations (
   PRIMARY KEY (member_id, store_id)
 );
 
--- Pending invitations. A person who signs in with an invited email joins the
--- account with the role and locations that were set for them.
+-- Join codes. An owner hands one out (BREW-4K7Q); whoever types it joins the
+-- account with the role and locations the code carries. A code can be tied to one
+-- email address, capped to a number of uses, or given an expiry date.
 CREATE TABLE IF NOT EXISTS invites (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   account_id    UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
-  email         TEXT NOT NULL,
+  email         TEXT,
   role          TEXT NOT NULL DEFAULT 'staff' CHECK (role IN ('owner', 'manager', 'staff')),
   all_locations BOOLEAN NOT NULL DEFAULT false,
   store_ids     BIGINT[] NOT NULL DEFAULT '{}',
   token         TEXT NOT NULL UNIQUE,
   invited_by    UUID REFERENCES members(id) ON DELETE SET NULL,
   accepted_at   TIMESTAMPTZ,
-  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (account_id, email)
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Added after the first release; safe to re-run.
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS code       TEXT;
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS label      TEXT NOT NULL DEFAULT '';
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS max_uses   INTEGER;
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS uses       INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+ALTER TABLE invites ADD COLUMN IF NOT EXISTS revoked_at TIMESTAMPTZ;
+ALTER TABLE invites ALTER COLUMN email DROP NOT NULL;
+ALTER TABLE invites DROP CONSTRAINT IF EXISTS invites_account_id_email_key;
+
+UPDATE invites SET code = upper(replace(token, '_', '')) WHERE code IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_invites_code ON invites (upper(code));
 CREATE INDEX IF NOT EXISTS idx_invites_email ON invites (lower(email));
 
 /* ------------------------------------------------------- catalogue & stock */

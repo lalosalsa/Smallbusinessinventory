@@ -17,9 +17,10 @@ out of the box.
 
 - **As many locations as you like.** Every product carries its own par level, reorder point
   and on-hand count per location, so nothing gets mixed up between them.
-- **People, with roles and locations.** Owners run the account; managers run the
-  catalogue and the ordering; staff count stock. Each person is assigned the locations
-  they work in and sees only those.
+- **People join with a code.** An owner creates a join code — `BREW-4K7Q` — carrying a
+  role and a set of locations. Whoever types it is in. Owners run the account; managers
+  run the catalogue and the ordering; staff count stock. Each person sees only the
+  locations their code gave them.
 - **Products keyed to supplier SKUs.** One product can come from several suppliers, each
   with its own SKU, case size and price. Order sheets go out with the supplier's SKU on
   every line, which is what they need to fill it.
@@ -54,8 +55,8 @@ npm run seed             # a demo account with 8 weeks of counts, orders and sch
                          # signs in as owner@example.com / password123
 ```
 
-`docs/supabase-setup.md` walks through getting the connection string and keys out of the
-Supabase dashboard, and covers the email-confirmation setting that catches people out.
+`docs/supabase-setup.md` walks through getting the connection string out of the Supabase
+dashboard. Only `DATABASE_URL` is needed — sign-in works out of the box.
 
 ```bash
 npm test                 # 67 tests, run against a real Postgres
@@ -65,13 +66,19 @@ PORT=8080 npm start      # serve on another port
 
 ### Sign-in
 
-Set `SUPABASE_URL` and `SUPABASE_ANON_KEY` and the app uses **Supabase Auth**: the browser
-signs in against Supabase, and the server checks the token on every request. Password
-resets and email confirmation come with it.
+**Nobody ever waits on an email to get in.** By default the app handles sign-in itself: a
+new person types an email and a password and is straight into the app. No confirmation
+email, no verification code, no magic link. An invited person does exactly the same, with
+the address they were invited at, and lands on your account with their role and locations
+already set.
 
-Leave those unset and the app keeps its **own email/password sign-in** in the `local_users`
-table instead — handy for a laptop behind the counter, or for trying things out. Either
-way, the app's own `members` table decides who may do what.
+If you would rather Supabase handled sign-in (for its password-reset emails, say), set
+`AUTH_MODE=supabase` along with `SUPABASE_URL` and `SUPABASE_ANON_KEY`. Do turn **Confirm
+email** off first — Supabase dashboard → Authentication → Sign In / Providers → Email —
+or new people will be made to click an emailed link before they can sign in. If you leave
+it on, the app says so plainly instead of leaving anyone stuck.
+
+Either way, the app's own `members` table decides who may do what.
 
 ---
 
@@ -84,7 +91,7 @@ way, the app's own `members` table decides who may do what.
 | Products, suppliers, pars, SKUs | ✓ | ✓ | |
 | Build, send and receive orders | ✓ | ✓ | |
 | Standing order days | ✓ | ✓ | |
-| Invite people, set roles | ✓ | | |
+| Create join codes, set roles | ✓ | | |
 | Add and remove locations | ✓ | | |
 
 Managers and staff see only the locations assigned to them — a barista at one shop cannot
@@ -92,20 +99,37 @@ count, or even see, the stock at the other. Tick **every location** instead and 
 follows the account as new locations are added. Owners always reach everything, and an
 account can never be left without one.
 
-Inviting someone is one step: **People → Invite someone**, with their email, a role and
-their locations. They join the account the first time they sign in with that address.
+### Getting someone in
+
+**People → Create join code.** Choose the role and locations it grants, then hand the code
+over however you like — text it, write it on the whiteboard, read it down the phone. They
+sign up at the same web address, type it, and they are in. Nothing is emailed, and there is
+no link to click.
+
+A code can be:
+
+- **capped** — one use for a single hire, five for a new shift, or unlimited
+- **time-limited** — expires after a number of days
+- **reserved** — tied to one email address, so only that person can use it
+- **turned off** — at any point, without disturbing anyone who already joined
+
+Used and turned-off codes stay listed under People so you can see who came in on what.
+A code tied to an email is applied automatically the first time that person signs in, so
+they need not type anything at all.
 
 ## The daily rhythm
 
-1. **Count.** *Stock & counts* → pick the location from the top-right chip, type what you
+1. **Sign in.** Everyone uses the same web address. New people either start a business or
+   type the join code they were given.
+2. **Count.** *Stock & counts* → pick the location from the top-right chip, type what you
    counted, **Save count**. That writes a dated count and resets on-hand for that location.
-2. **Order.** When an order day comes up (*Order schedule*), hit **Build draft**. Adjust
+3. **Order.** When an order day comes up (*Order schedule*), hit **Build draft**. Adjust
    quantities, save, then **Export CSV for supplier**, **Copy as text** or **Email
    supplier**.
-3. **Receive.** When the delivery lands, open the order and hit **Receive delivery**. The
+4. **Receive.** When the delivery lands, open the order and hit **Receive delivery**. The
    quantities are added to stock, and they are what tell the app the difference between
    "we used it" and "it never arrived".
-4. **Review.** *Usage* shows what you went through this week, this month, or over any
+5. **Review.** *Usage* shows what you went through this week, this month, or over any
    range you pick.
 
 ## How usage is worked out
@@ -244,7 +268,8 @@ what you edit is what runs.
 | Variable | Meaning |
 | --- | --- |
 | `DATABASE_URL` | **Required.** Postgres/Supabase connection string |
-| `SUPABASE_URL`, `SUPABASE_ANON_KEY` | Set both to sign in with Supabase Auth |
+| `AUTH_MODE=supabase` | Sign in with Supabase Auth instead of the app's own (needs the two below) |
+| `SUPABASE_URL`, `SUPABASE_ANON_KEY` | Your Supabase project's URL and anon key |
 | `PORT`, `HOST` | Where to listen (default `3000`, `0.0.0.0`) |
 | `SKIP_MIGRATE=1` | Do not apply `sql/schema.sql` at boot |
 | `PGSSL=disable` | For a plain local Postgres |
@@ -272,7 +297,11 @@ except the sign-in ones. Everything is scoped to the signed-in person's account.
 | POST | `/auth/register`, `/auth/login` | Local-mode sign-in |
 | GET | `/auth/me` | Who am I, my role, my locations |
 | POST | `/accounts` | Create the business (first run) |
-| GET/POST/PUT/DELETE | `/members`, `/members/invite`, `/invites/:id` | People |
+| GET/PUT/DELETE | `/members`, `/members/:id` | People on the account |
+| POST | `/members/invite` | Create a join code |
+| POST/DELETE | `/invites/:id/revoke`, `/invites/:id` | Turn a code off, or delete it |
+| GET | `/join/:code` | What a code is for, before using it |
+| POST | `/join` | Join the account a code belongs to |
 | GET/POST/PUT/DELETE | `/stores`, `/suppliers`, `/products` | Locations and catalogue |
 | GET | `/inventory?store_id=&only=below_par` | Stock position for a location |
 | POST | `/counts`, `/receipts` | Save a count; book stock in |

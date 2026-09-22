@@ -8,19 +8,34 @@ const { db } = require('./db');
 /**
  * Sign-in. Two modes, chosen by what is configured:
  *
- *   supabase - SUPABASE_URL + SUPABASE_ANON_KEY are set. The browser signs in with
- *              Supabase Auth and sends its access token; the server checks it with
- *              Supabase and reads the user from it.
- *   local    - no Supabase configured. The server keeps email/password sign-in of
- *              its own, so the app still runs on a laptop or a LAN box.
+ *   local    - the default. The server keeps its own email/password sign-in, so
+ *              signing up is one form and you are in: no confirmation email, no
+ *              verification code, no magic link.
+ *   supabase - opt in with AUTH_MODE=supabase. The browser signs in with Supabase
+ *              Auth and sends its access token; the server checks it with Supabase.
+ *              Turn "Confirm email" off in the Supabase dashboard unless you want
+ *              new people to have to click a link before they can sign in.
  *
  * Either way the app's own `members` table decides what a signed-in person may do.
  */
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
-const MODE = SUPABASE_URL && SUPABASE_ANON_KEY ? 'supabase' : 'local';
 const TOKEN_TTL_SECONDS = Number(process.env.AUTH_TOKEN_TTL) || 60 * 60 * 24 * 30;
+
+// Local sign-in is the default, even when the database is a Supabase one: a new
+// person picks a password and is straight in, with no confirmation email, no code
+// and no magic link. Supabase Auth is opt-in with AUTH_MODE=supabase.
+const MODE = resolveMode();
+
+function resolveMode() {
+  const wanted = String(process.env.AUTH_MODE || 'local').toLowerCase();
+  if (wanted !== 'supabase') return 'local';
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    throw new Error('AUTH_MODE=supabase needs SUPABASE_URL and SUPABASE_ANON_KEY as well');
+  }
+  return 'supabase';
+}
 
 let supabaseClient = null;
 function supabase() {

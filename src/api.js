@@ -118,9 +118,10 @@ router.get('/members', async (req, res) => {
   });
 });
 
+/** Creates a join code to hand out. */
 router.post('/members/invite', async (req, res) => {
   const member = requireMember(req, 'manage_account');
-  res.status(201).json(await accounts.inviteMember(member, req.body || {}));
+  res.status(201).json(await accounts.createInvite(member, req.body || {}));
 });
 
 router.put('/members/:id', async (req, res) => {
@@ -133,9 +134,28 @@ router.delete('/members/:id', async (req, res) => {
   res.json(await accounts.removeMember(member, req.params.id));
 });
 
-router.delete('/invites/:id', async (req, res) => {
+/** Turns a code off without losing the record of who it was for. */
+router.post('/invites/:id/revoke', async (req, res) => {
   const member = requireMember(req, 'manage_account');
   res.json(await accounts.revokeInvite(member, req.params.id));
+});
+
+router.delete('/invites/:id', async (req, res) => {
+  const member = requireMember(req, 'manage_account');
+  res.json(await accounts.deleteInvite(member, req.params.id));
+});
+
+/** What a join code is for — shown before anyone commits to using it. */
+router.get('/join/:code', async (req, res) => {
+  res.json(await accounts.describeCode(req.params.code, req.user?.email || null));
+});
+
+/** Joins the signed-in person to the account a code belongs to. */
+router.post('/join', async (req, res) => {
+  const user = requireUser(req);
+  const { code } = req.body || {};
+  if (!code) throw httpError(400, 'Enter the join code you were given');
+  res.status(201).json(await accounts.redeemCode(user, code));
 });
 
 /* --------------------------------------------------------------- locations */

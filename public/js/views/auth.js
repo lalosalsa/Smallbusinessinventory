@@ -1,4 +1,4 @@
-import { el, field, input, toast } from '../util.js';
+import { api, el, field, input, toast } from '../util.js';
 import * as session from '../session.js';
 
 /** The signed-out screen: sign in, or create a sign-in. */
@@ -17,7 +17,8 @@ export function authScreen(onDone) {
       el('p.muted', {
         text: mode === 'sign-in'
           ? 'Sign in to your business account.'
-          : 'Create a sign-in. If someone has invited you, use the address they invited.',
+          : 'Pick a password and you are in \u2014 no confirmation email, no code. '
+            + 'If someone invited you, use the address they invited.',
       }),
       mode === 'sign-up' ? field('Your name', name) : null,
       field('Email', email),
@@ -51,17 +52,11 @@ export function authScreen(onDone) {
         if (mode === 'sign-in') {
           await session.signIn({ email: email.value.trim(), password: password.value });
         } else {
-          const res = await session.signUp({
+          await session.signUp({
             email: email.value.trim(),
             password: password.value,
             display_name: name.value.trim(),
           });
-          if (res.needsConfirmation) {
-            message.textContent = res.message;
-            message.className = 'auth-message ok';
-            mode = 'sign-in';
-            return;
-          }
         }
         onDone();
       } catch (err) {
@@ -75,8 +70,89 @@ export function authScreen(onDone) {
   return host;
 }
 
-/** Signed in, but not attached to a business yet. */
+/**
+ * Signed in, but not attached to a business yet: either start one, or join an
+ * existing one with the code its owner handed out.
+ */
 export function accountSetupScreen(onDone) {
+  const host = el('div.auth-shell');
+  let choice = 'join';
+
+  const render = () => {
+    host.replaceChildren(el('div.auth-card.wide', {}, [
+      el('h1', { text: 'Getting started' }),
+      el('p.muted', { text: `Signed in as ${session.user()?.email}.` }),
+      el('div.tabs.sub', {}, [
+        el('button.tab', {
+          type: 'button', text: 'Join a business', class: choice === 'join' ? 'active' : '',
+          onclick: () => { choice = 'join'; render(); },
+        }),
+        el('button.tab', {
+          type: 'button', text: 'Start a new business', class: choice === 'create' ? 'active' : '',
+          onclick: () => { choice = 'create'; render(); },
+        }),
+      ]),
+      choice === 'join' ? joinForm(onDone) : createForm(onDone),
+      el('button.link', { type: 'button', text: 'Sign out', onclick: async () => { await session.signOut(); onDone(); } }),
+    ]));
+  };
+
+  render();
+  return host;
+}
+
+/** Type the code you were given; the app names the business before you commit to it. */
+function joinForm(onDone) {
+  const code = input({ placeholder: 'e.g. BREW-4K7Q', autocapitalize: 'characters', autocomplete: 'off' });
+  const message = el('p.auth-message');
+  const preview = el('div.code-preview');
+
+  let lastLooked = '';
+  const look = async () => {
+    const value = code.value.trim();
+    if (value === lastLooked) return;
+    lastLooked = value;
+    preview.replaceChildren();
+    message.textContent = '';
+    if (value.length < 4) return;
+
+    try {
+      const info = await api(`/join/${encodeURIComponent(value)}`);
+      preview.replaceChildren(
+        el('div.strong', { text: info.account_name }),
+        el('div.muted.small', {
+          text: `Joining as ${info.role} \u00b7 ${info.all_locations ? 'all locations' : info.locations.join(', ') || 'no locations yet'}`,
+        }),
+      );
+    } catch (err) {
+      message.textContent = err.message;
+      message.className = 'auth-message bad';
+    }
+  };
+
+  code.addEventListener('blur', look);
+  code.addEventListener('change', look);
+
+  return el('form.stack.gap', { onsubmit: async (e) => {
+    e.preventDefault();
+    try {
+      await api('/join', { method: 'POST', body: { code: code.value.trim() } });
+      await session.refresh();
+      onDone();
+    } catch (err) {
+      message.textContent = err.message;
+      message.className = 'auth-message bad';
+    }
+  } }, [
+    field('Join code', code, 'Whoever runs the business creates one for you under People'),
+    preview,
+    message,
+    el('button.btn', { type: 'submit', text: 'Join' }),
+  ]);
+}
+
+/** Start a new business: name it and its locations. */
+function createForm(onDone) {
   const name = input({ required: true, placeholder: 'e.g. Riverside Coffee Co' });
   const locationRows = el('div.stack.gap');
   const message = el('p.auth-message');
@@ -91,18 +167,14 @@ export function accountSetupScreen(onDone) {
   addLocation('Store 1');
   addLocation('Store 2');
 
-  const form = el('form.auth-card.wide', { onsubmit: submit }, [
-    el('h1', { text: 'Set up your business' }),
-    el('p.muted', { text: `Signed in as ${session.user()?.email}. Name the business and its locations — you can add more later.` }),
+  const form = el('form.stack.gap', { onsubmit: submit }, [
+    el('p.muted', { text: 'Name the business and its locations \u2014 you can add more later.' }),
     field('Business name', name),
     el('h3.section-title', { text: 'Locations' }),
     locationRows,
     el('button.btn.ghost.small', { type: 'button', text: '+ Add another location', onclick: () => addLocation() }),
     message,
-    el('div.row.gap', {}, [
-      el('button.btn', { type: 'submit', text: 'Create account' }),
-      el('button.link', { type: 'button', text: 'Sign out', onclick: async () => { await session.signOut(); onDone(); } }),
-    ]),
+    el('button.btn', { type: 'submit', text: 'Create account' }),
   ]);
 
   async function submit(e) {
@@ -111,13 +183,7 @@ export function accountSetupScreen(onDone) {
     if (!locations.length) { message.textContent = 'Add at least one location'; message.className = 'auth-message bad'; return; }
 
     try {
-      const res = await fetch('/api/accounts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.token()}` },
-        body: JSON.stringify({ name: name.value.trim(), locations }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      await api('/accounts', { method: 'POST', body: { name: name.value.trim(), locations } });
       await session.refresh();
       onDone();
     } catch (err) {
@@ -126,7 +192,7 @@ export function accountSetupScreen(onDone) {
     }
   }
 
-  return el('div.auth-shell', {}, [form]);
+  return form;
 }
 
 /** Signed in, invited to nothing, and not an owner: nothing to show them yet. */

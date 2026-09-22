@@ -1,4 +1,4 @@
-import { api, el, toast, modal, field, input, select, empty, confirmAction, relative } from '../util.js';
+import { api, el, toast, modal, field, input, select, empty, confirmAction, relative, dateOnly } from '../util.js';
 import { getState, refreshReference } from '../store.js';
 import * as session from '../session.js';
 
@@ -18,11 +18,11 @@ export async function peopleView(root) {
         el('h1', { text: 'People' }),
         el('p.muted', {
           text: canManage
-            ? 'Invite the people who work for you and choose which locations each of them can see.'
-            : 'Everyone on this account. Only an owner can change roles or invite people.',
+            ? 'Create a join code, hand it to whoever needs it, and they arrive with the role and locations you chose.'
+            : 'Everyone on this account. Only an owner can change roles or hand out join codes.',
         }),
       ]),
-      canManage ? el('button.btn', { text: 'Invite someone', onclick: () => inviteEditor(load) }) : null,
+      canManage ? el('button.btn', { text: 'Create join code', onclick: () => inviteEditor(load) }) : null,
     ]),
     body,
   );
@@ -68,26 +68,24 @@ export async function peopleView(root) {
     ]));
 
     if (canManage) {
+      const active = data.invites.filter((i) => i.status === 'active');
+      const spent = data.invites.filter((i) => i.status !== 'active');
+
       body.append(el('section.card', {}, [
-        el('h3', { text: 'Pending invitations' }),
-        data.invites.length
-          ? el('div.export-grid', {}, data.invites.map((i) => el('div.export-row', {}, [
-            el('div', {}, [
-              el('div.strong', { text: i.email }),
-              el('div.muted.small', { text: `${i.role} · ${i.all_locations ? 'all locations' : `${i.store_ids.length} location(s)`} · invited ${relative(i.created_at)}` }),
-            ]),
-            el('button.link.danger', { text: 'Cancel', onclick: async () => {
-              await api(`/invites/${i.id}`, { method: 'DELETE' });
-              toast('Invitation cancelled');
-              load();
-            } }),
-          ])))
-          : empty('Nobody is waiting to join. Invited people appear here until they sign in for the first time.'),
-        el('p.muted.small', {
-          text: session.mode() === 'supabase'
-            ? 'An invited person signs up through Supabase with the address you invited, and joins this account automatically.'
-            : 'An invited person creates a sign-in with the address you invited, and joins this account automatically.',
-        }),
+        el('div.card-head', {}, [
+          el('h3', { text: 'Join codes' }),
+          el('button.btn.ghost.small', { text: 'Create join code', onclick: () => inviteEditor(load) }),
+        ]),
+        el('p.muted.small', { text: 'Anyone who signs up and types one of these joins the business straight away, with the role and locations the code carries.' }),
+        active.length
+          ? el('div.export-grid', {}, active.map((invite) => codeRow(invite, load)))
+          : empty('No live join codes. Create one and send it to whoever needs access.'),
+        spent.length
+          ? el('details.spent-codes', {}, [
+            el('summary', { text: `${spent.length} used or turned off` }),
+            el('div.export-grid', {}, spent.map((invite) => codeRow(invite, load, true))),
+          ])
+          : null,
       ]));
     }
   }
@@ -95,32 +93,109 @@ export async function peopleView(root) {
   await load();
 }
 
+function codeRow(invite, reload, spent = false) {
+  const limit = invite.max_uses == null
+    ? 'unlimited uses'
+    : `${invite.uses_left} of ${invite.max_uses} use${invite.max_uses === 1 ? '' : 's'} left`;
+
+  const details = [
+    invite.role,
+    invite.all_locations ? 'all locations' : invite.locations.join(', ') || 'no locations',
+    spent ? invite.reason : limit,
+    invite.email ? `for ${invite.email}` : null,
+    invite.expires_at && !spent ? `expires ${dateOnly(invite.expires_at)}` : null,
+  ].filter(Boolean).join(' \u00b7 ');
+
+  return el('div.export-row', {}, [
+    el('div', {}, [
+      el('div.row.gap', {}, [
+        el('code.join-code', { text: invite.code }),
+        invite.label ? el('span.muted.small', { text: invite.label }) : null,
+      ]),
+      el('div.muted.small', { text: details }),
+    ]),
+    el('div.row.gap', {}, [
+      spent ? null : el('button.btn.ghost.small', { text: 'Copy', onclick: async () => {
+        try { await navigator.clipboard.writeText(invite.code); toast(`Copied ${invite.code}`); }
+        catch { toast(`Code is ${invite.code}`); }
+      } }),
+      spent ? null : el('button.link.danger', { text: 'Turn off', onclick: async () => {
+        await api(`/invites/${invite.id}/revoke`, { method: 'POST' });
+        toast('Join code turned off');
+        reload();
+      } }),
+      !spent ? null : el('button.link.danger', { text: 'Delete', onclick: async () => {
+        await api(`/invites/${invite.id}`, { method: 'DELETE' });
+        reload();
+      } }),
+    ]),
+  ]);
+}
+
 function inviteEditor(onSaved) {
   const { stores } = getState();
-  const email = input({ type: 'email', required: true, placeholder: 'them@yourbusiness.com' });
-  const role = select(Object.keys(ROLE_BLURB).map((r) => ({ value: r, label: `${r} — ${ROLE_BLURB[r]}` })), { value: 'staff' });
+  const label = input({ placeholder: 'e.g. Weekend baristas' });
+  const role = select(Object.keys(ROLE_BLURB).map((r) => ({ value: r, label: `${r} \u2014 ${ROLE_BLURB[r]}` })), { value: 'staff' });
+  const email = input({ type: 'email', placeholder: 'Leave blank for anyone' });
+  const maxUses = el('input.num-input', { type: 'number', min: '1', value: 1, placeholder: 'unlimited' });
+  const unlimited = el('input', { type: 'checkbox', onchange: () => { maxUses.disabled = unlimited.checked; } });
+  const expires = el('input.num-input', { type: 'number', min: '1', placeholder: 'never' });
   const { locationPicker, readLocations, allBox } = locationChooser(stores, { all: false, selected: [] });
 
   const form = el('form.modal-body', { onsubmit: async (e) => {
     e.preventDefault();
     try {
-      await api('/members/invite', {
+      const created = await api('/members/invite', {
         method: 'POST',
-        body: { email: email.value.trim(), role: role.value, all_locations: allBox.checked, store_ids: readLocations() },
+        body: {
+          label: label.value.trim(),
+          role: role.value,
+          email: email.value.trim() || null,
+          all_locations: allBox.checked,
+          store_ids: readLocations(),
+          max_uses: unlimited.checked ? null : Number(maxUses.value) || 1,
+          expires_in_days: expires.value ? Number(expires.value) : null,
+        },
       });
-      toast('Invitation ready — they join when they first sign in');
       close();
       onSaved();
+      showCode(created);
     } catch (err) { toast(err.message, 'bad'); }
   } }, [
-    field('Email address', email, 'They join this account the first time they sign in with it'),
+    el('p.muted.small', { text: 'The code works as soon as it exists. Whoever types it joins with the role and locations you set here.' }),
+    field('Label (optional)', label, 'Just for you, so you remember who a code was for'),
     field('Role', role),
     el('h3.section-title', { text: 'Locations' }),
     locationPicker,
-    el('div.modal-foot', {}, [el('button.btn', { type: 'submit', text: 'Send invitation' })]),
+    el('h3.section-title', { text: 'Limits' }),
+    el('div.grid.two', {}, [
+      field('How many people can use it', el('div.row.gap', {}, [
+        maxUses,
+        el('label.inline.small', {}, [unlimited, el('span', { text: 'No limit' })]),
+      ])),
+      field('Expires in (days)', expires, 'Leave blank and it never expires'),
+      field('Only this email may use it', email, 'Optional \u2014 handy for a single person'),
+    ]),
+    el('div.modal-foot', {}, [el('button.btn', { type: 'submit', text: 'Create code' })]),
   ]);
 
-  const { close } = modal('Invite someone', form);
+  const { close } = modal('New join code', form, { wide: true });
+}
+
+/** Shows the fresh code big enough to read out or write down. */
+function showCode(invite) {
+  const body = el('div.modal-body', {}, [
+    el('p.muted', { text: 'Give this to whoever is joining. They sign up at this site, type the code, and they are in.' }),
+    el('div.big-code', { text: invite.code }),
+    el('div.row.gap', {}, [
+      el('button.btn', { text: 'Copy code', onclick: async () => {
+        try { await navigator.clipboard.writeText(invite.code); toast('Copied'); }
+        catch { toast(`Code is ${invite.code}`); }
+      } }),
+      el('button.btn.ghost', { text: 'Done', onclick: () => close() }),
+    ]),
+  ]);
+  const { close } = modal('Join code ready', body);
 }
 
 function memberEditor(member, stores, onSaved) {

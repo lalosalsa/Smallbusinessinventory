@@ -17,6 +17,14 @@ types.setTypeParser(1700, (v) => (v === null ? null : parseFloat(v)));
 types.setTypeParser(20, (v) => (v === null ? null : parseInt(v, 10)));
 types.setTypeParser(1082, (v) => v);
 
+// bigint[] (store_ids) arrives as the literal '{1,2}' and keeps its elements as
+// strings unless we say otherwise, which quietly breaks id comparisons in JS.
+types.setTypeParser(1016, (v) => {
+  if (v === null) return null;
+  const inner = v.replace(/^\{|\}$/g, '');
+  return inner ? inner.split(',').map(Number) : [];
+});
+
 const CONNECTION = process.env.DATABASE_URL || process.env.SUPABASE_DB_URL || '';
 
 function sslSetting(connection) {

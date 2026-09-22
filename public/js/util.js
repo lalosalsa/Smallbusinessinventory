@@ -1,6 +1,7 @@
 // Shared helpers: API access, DOM building, formatting and toasts.
 
 import { token, refresh } from './session.js';
+import { readJson, request } from './http.js';
 
 function authHeaders(extra = {}) {
   const bearer = token();
@@ -8,14 +9,13 @@ function authHeaders(extra = {}) {
 }
 
 export async function api(path, options = {}) {
-  const res = await fetch(`/api${path}`, {
+  const res = await request(`/api${path}`, {
     ...options,
     headers: authHeaders(options.headers),
     body: options.body && typeof options.body !== 'string' ? JSON.stringify(options.body) : options.body,
   });
 
-  const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
+  const data = await readJson(res, `/api${path}`);
 
   if (res.status === 401) {
     // The session expired or was signed out elsewhere: fall back to the sign-in screen.
@@ -32,7 +32,7 @@ export async function api(path, options = {}) {
  */
 export async function download(path) {
   try {
-    const res = await fetch(`/api${path}`, { headers: authHeaders() });
+    const res = await request(`/api${path}`, { headers: authHeaders() });
     if (!res.ok) {
       const body = await res.text();
       let message = `Download failed (${res.status})`;

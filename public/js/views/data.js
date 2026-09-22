@@ -1,5 +1,6 @@
 import { api, el, toast, download, select } from '../util.js';
 import { getState, refreshReference } from '../store.js';
+import * as session from '../session.js';
 
 export async function dataView(root) {
   const { stores } = getState();
@@ -13,7 +14,7 @@ export async function dataView(root) {
       ]),
     ]),
     el('div.grid.two', {}, [
-      importCard({
+      session.can('manage_catalog') ? importCard({
         title: 'Import products & supplier SKUs',
         blurb: 'One row per product per supplier. Re-importing the same file updates what is already there instead of duplicating it.',
         endpoint: '/import/products',
@@ -34,8 +35,8 @@ export async function dataView(root) {
           ['on_hand', 'current stock for that store'],
         ],
         sample: 'products-sample.csv',
-      }),
-      importCard({
+      }) : null,
+      session.can('count') ? importCard({
         title: 'Import a count sheet',
         blurb: 'Bring counts in from a printed or tablet sheet. Rows match on SKU first, then product name.',
         endpoint: '/import/counts',
@@ -51,7 +52,7 @@ export async function dataView(root) {
           ['note', 'optional'],
         ],
         sample: 'counts-sample.csv',
-      }),
+      }) : null,
     ]),
     el('section.card', {}, [
       el('h3', { text: 'Exports' }),

@@ -3,7 +3,8 @@
 const path = require('path');
 const express = require('express');
 const api = require('./src/api');
-const { DB_PATH } = require('./src/db');
+const { migrate, ping, CONNECTION } = require('./src/db');
+const { authMode } = require('./src/auth');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -14,7 +15,6 @@ app.use(express.text({ type: 'text/csv', limit: '25mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.use('/api', api);
-
 app.use('/api', (req, res) => res.status(404).json({ error: 'Unknown endpoint' }));
 
 // Errors thrown inside routes carry an http status; everything else is a 500.
@@ -24,10 +24,26 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   res.status(status).json({ error: err.message || 'Something went wrong' });
 });
 
-if (require.main === module) {
+async function start() {
+  if (!CONNECTION) {
+    console.error('DATABASE_URL is not set.');
+    console.error('Copy .env.example to .env and put your Supabase connection string in it, then try again.');
+    process.exit(1);
+  }
+  await ping();
+  if (process.env.SKIP_MIGRATE !== '1') await migrate();
+
   app.listen(PORT, HOST, () => {
     console.log(`Inventory app running at http://localhost:${PORT}`);
-    console.log(`Database: ${DB_PATH}`);
+    console.log(`Sign-in: ${authMode()}`);
+  });
+}
+
+if (require.main === module) {
+  require('./src/env').load();
+  start().catch((err) => {
+    console.error('Could not start:', err.message);
+    process.exit(1);
   });
 }
 

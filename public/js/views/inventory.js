@@ -1,6 +1,7 @@
 import { api, el, qty, relative, toast, download, empty, select, today } from '../util.js';
 import { activeStore, supplierOptions, categoryOptions } from '../store.js';
 import { go } from '../router.js';
+import * as session from '../session.js';
 
 const filters = { search: '', supplier_id: '', category: '', only: '' };
 
@@ -17,7 +18,7 @@ export async function inventoryView(root) {
     el('div.row.gap', {}, [
       el('button.btn.ghost', { text: 'Export stock CSV', onclick: () => download(`/export/inventory.csv?store_id=${store.id}`) }),
       el('button.btn.ghost', { text: 'Blank count sheet', onclick: () => download(`/export/count-sheet.csv?store_id=${store.id}`) }),
-      el('button.btn', { text: 'Build order sheet', onclick: () => go('/orders/new') }),
+      session.can('manage_orders') ? el('button.btn', { text: 'Build order sheet', onclick: () => go('/orders/new') }) : null,
     ]),
   ]);
 

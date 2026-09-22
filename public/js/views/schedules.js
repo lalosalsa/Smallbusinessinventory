@@ -1,6 +1,7 @@
 import { api, el, toast, modal, field, select, input, empty, confirmAction, today } from '../util.js';
 import { getState } from '../store.js';
 import { go } from '../router.js';
+import * as session from '../session.js';
 
 const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -13,7 +14,7 @@ export async function schedulesView(root) {
         el('h1', { text: 'Order schedule' }),
         el('p.muted', { text: 'Set the days you order from each supplier — weekly, every two weeks, monthly, or any number of days apart. When an order day comes round, build the draft in one click.' }),
       ]),
-      el('div.row.gap', {}, [
+      !session.can('manage_orders') ? null : el('div.row.gap', {}, [
         el('button.btn.ghost', { text: 'Build all due orders', onclick: runAllDue }),
         el('button.btn', { text: 'New schedule', onclick: () => scheduleEditor(null, load) }),
       ]),

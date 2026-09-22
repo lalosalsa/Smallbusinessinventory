@@ -91,8 +91,8 @@ function scheduleStatus(schedule, today = todayIso()) {
   // set up: back-dating the start date sets the rhythm, it does not raise months of
   // missed orders.
   const baseline = schedule.last_ordered_on
-    ? addDays(schedule.last_ordered_on, 1)
-    : laterOf(schedule.anchor_date, (schedule.created_at || '').slice(0, 10));
+    ? addDays(dateOnly(schedule.last_ordered_on), 1)
+    : laterOf(dateOnly(schedule.anchor_date), dateOnly(schedule.created_at));
   const pending = nextOccurrence(schedule, baseline);
   const dueNow = pending <= today;
   const nextDue = dueNow ? nextOccurrence(schedule, addDays(today, 1)) : pending;
@@ -118,20 +118,23 @@ const SELECT_SCHEDULES = `
   JOIN stores s    ON s.id = sc.store_id
 `;
 
-function listSchedules({ activeOnly = false, storeId = null } = {}) {
-  let sql = SELECT_SCHEDULES + ' WHERE 1=1';
-  const params = {};
-  if (activeOnly) sql += ' AND sc.active = 1';
-  if (storeId) { sql += ' AND sc.store_id = @storeId'; params.storeId = Number(storeId); }
-  sql += ' ORDER BY v.name, s.name';
+async function listSchedules({ accountId, activeOnly = false, storeIds = null } = {}) {
+  const rows = await db.all(`
+    ${SELECT_SCHEDULES}
+    WHERE sc.account_id = :account
+      AND (:activeOnly = false OR sc.active)
+      AND (:storeIds::bigint[] IS NULL OR sc.store_id = ANY(:storeIds))
+    ORDER BY v.name, s.name
+  `, { account: accountId, activeOnly: !!activeOnly, storeIds: storeIds && storeIds.length ? storeIds : null });
 
-  return db.prepare(sql).all(params)
+  return rows
     .map((s) => ({ ...s, ...scheduleStatus(s) }))
     .sort((a, b) => (a.due_date ? 0 : 1) - (b.due_date ? 0 : 1) || a.next_due.localeCompare(b.next_due));
 }
 
-function getSchedule(id) {
-  const row = db.prepare(`${SELECT_SCHEDULES} WHERE sc.id = ?`).get(id);
+async function getSchedule(accountId, id) {
+  const row = await db.one(`${SELECT_SCHEDULES} WHERE sc.id = :id AND sc.account_id = :account`,
+    { id, account: accountId });
   return row ? { ...row, ...scheduleStatus(row) } : null;
 }
 
@@ -139,61 +142,95 @@ const WRITABLE = ['supplier_id', 'store_id', 'name', 'frequency', 'day_of_week',
   'interval_days', 'anchor_date', 'lead_time_days', 'auto_draft', 'mode', 'days_of_cover',
   'lookback_days', 'note', 'active'];
 
-function saveSchedule(body, id = null) {
+const COLUMN_PARAMS = {
+  supplier_id: 'supplierId', store_id: 'storeId', name: 'name', frequency: 'frequency',
+  day_of_week: 'dayOfWeek', day_of_month: 'dayOfMonth', interval_days: 'intervalDays',
+  anchor_date: 'anchorDate', lead_time_days: 'leadTime', auto_draft: 'autoDraft',
+  mode: 'mode', days_of_cover: 'daysOfCover', lookback_days: 'lookbackDays',
+  note: 'note', active: 'active',
+};
+
+function normalise(body) {
   const payload = {
-    supplier_id: Number(body.supplier_id),
-    store_id: Number(body.store_id),
+    supplierId: Number(body.supplier_id),
+    storeId: Number(body.store_id),
     name: body.name || '',
     frequency: body.frequency || 'weekly',
-    day_of_week: body.day_of_week === '' || body.day_of_week == null ? null : Number(body.day_of_week),
-    day_of_month: body.day_of_month === '' || body.day_of_month == null ? null : Number(body.day_of_month),
-    interval_days: body.interval_days === '' || body.interval_days == null ? null : Number(body.interval_days),
-    anchor_date: (body.anchor_date || todayIso()).slice(0, 10),
-    lead_time_days: body.lead_time_days === '' || body.lead_time_days == null ? null : Number(body.lead_time_days),
-    auto_draft: body.auto_draft === false || body.auto_draft === 0 ? 0 : 1,
+    dayOfWeek: blankToNull(body.day_of_week),
+    dayOfMonth: blankToNull(body.day_of_month),
+    intervalDays: blankToNull(body.interval_days),
+    anchorDate: (body.anchor_date || todayIso()).slice(0, 10),
+    leadTime: blankToNull(body.lead_time_days),
+    autoDraft: body.auto_draft === false || body.auto_draft === 0 ? false : true,
     mode: body.mode || 'both',
-    days_of_cover: Number(body.days_of_cover) || 7,
-    lookback_days: Number(body.lookback_days) || 28,
+    daysOfCover: Number(body.days_of_cover) || 7,
+    lookbackDays: Number(body.lookback_days) || 28,
     note: body.note || '',
-    active: body.active === false || body.active === 0 ? 0 : 1,
+    active: body.active === false || body.active === 0 ? false : true,
   };
 
-  if (!payload.supplier_id || !payload.store_id) throw httpError(400, 'A schedule needs a supplier and a store');
+  if (!payload.supplierId || !payload.storeId) throw httpError(400, 'A schedule needs a supplier and a store');
   if (!['weekly', 'biweekly', 'monthly', 'days'].includes(payload.frequency)) throw httpError(400, 'Unknown frequency');
-  if (['weekly', 'biweekly'].includes(payload.frequency) && payload.day_of_week == null) {
+  if (['weekly', 'biweekly'].includes(payload.frequency) && payload.dayOfWeek == null) {
     throw httpError(400, 'Pick the day of the week to order on');
   }
-  if (payload.frequency === 'monthly' && payload.day_of_month == null) throw httpError(400, 'Pick the day of the month');
-  if (payload.frequency === 'days' && !(payload.interval_days > 0)) throw httpError(400, 'Set how many days apart the orders are');
+  if (payload.frequency === 'monthly' && payload.dayOfMonth == null) throw httpError(400, 'Pick the day of the month');
+  if (payload.frequency === 'days' && !(payload.intervalDays > 0)) throw httpError(400, 'Set how many days apart the orders are');
+
+  return payload;
+}
+
+function blankToNull(value) {
+  if (value === '' || value === null || value === undefined) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+async function saveSchedule(accountId, body, id = null) {
+  const payload = normalise(body);
+
+  const supplier = await db.one('SELECT id FROM suppliers WHERE id = :id AND account_id = :account',
+    { id: payload.supplierId, account: accountId });
+  const store = await db.one('SELECT id FROM stores WHERE id = :id AND account_id = :account',
+    { id: payload.storeId, account: accountId });
+  if (!supplier) throw httpError(404, 'Supplier not found');
+  if (!store) throw httpError(404, 'Location not found');
 
   if (id) {
-    db.prepare(`UPDATE order_schedules SET ${WRITABLE.map((c) => `${c} = @${c}`).join(', ')} WHERE id = @id`)
-      .run({ ...payload, id: Number(id) });
-    return getSchedule(id);
+    const sets = WRITABLE.map((c) => `${c} = :${COLUMN_PARAMS[c]}`).join(', ');
+    const updated = await db.one(`UPDATE order_schedules SET ${sets}
+      WHERE id = :id AND account_id = :account RETURNING id`, { ...payload, id, account: accountId });
+    if (!updated) throw httpError(404, 'Schedule not found');
+    return getSchedule(accountId, id);
   }
-  const newId = db.prepare(`INSERT INTO order_schedules (${WRITABLE.join(', ')})
-    VALUES (${WRITABLE.map((c) => '@' + c).join(', ')})`).run(payload).lastInsertRowid;
-  return getSchedule(newId);
+
+  const columns = ['account_id', ...WRITABLE];
+  const values = [':account', ...WRITABLE.map((c) => `:${COLUMN_PARAMS[c]}`)];
+  const created = await db.one(`
+    INSERT INTO order_schedules (${columns.join(', ')}) VALUES (${values.join(', ')}) RETURNING id
+  `, { ...payload, account: accountId });
+  return getSchedule(accountId, created.id);
 }
 
 /**
  * Raises the draft order a schedule is due for, using that schedule's own suggestion
- * settings. Returns { order, sheet } — order is null when nothing needs ordering, and
+ * settings. Returns { order, sheet } - order is null when nothing needs ordering, and
  * the schedule still moves on so it does not stay stuck on a past date.
  */
-function runSchedule(id, { force = false, markOnly = false } = {}) {
-  const schedule = getSchedule(id);
+async function runSchedule(accountId, id, { force = false, markOnly = false, createdBy = null } = {}) {
+  const schedule = await getSchedule(accountId, id);
   if (!schedule) throw httpError(404, 'Schedule not found');
 
   const dueDate = schedule.due_date || (force ? schedule.next_due : null);
   if (!dueDate) throw httpError(400, `That schedule is not due until ${schedule.next_due}`);
 
   if (markOnly) {
-    db.prepare('UPDATE order_schedules SET last_ordered_on = ? WHERE id = ?').run(dueDate, id);
-    return { order: null, skipped: true, covered_date: dueDate, schedule: getSchedule(id) };
+    await db.run('UPDATE order_schedules SET last_ordered_on = :date WHERE id = :id', { date: dueDate, id });
+    return { order: null, skipped: true, covered_date: dueDate, schedule: await getSchedule(accountId, id) };
   }
 
-  const sheet = suggestOrder({
+  const sheet = await suggestOrder({
+    accountId,
     storeId: schedule.store_id,
     supplierId: schedule.supplier_id,
     mode: schedule.mode,
@@ -203,43 +240,54 @@ function runSchedule(id, { force = false, markOnly = false } = {}) {
   });
 
   if (!sheet.lines.length) {
-    db.prepare('UPDATE order_schedules SET last_ordered_on = ? WHERE id = ?').run(dueDate, id);
-    return { order: null, sheet, covered_date: dueDate, schedule: getSchedule(id) };
+    await db.run('UPDATE order_schedules SET last_ordered_on = :date WHERE id = :id', { date: dueDate, id });
+    return { order: null, sheet, covered_date: dueDate, schedule: await getSchedule(accountId, id) };
   }
 
   const note = [schedule.name || describe(schedule), `scheduled for ${dueDate}`, schedule.note]
-    .filter(Boolean).join(' — ');
-  const order = createOrder({
+    .filter(Boolean).join(' \u2014 ');
+
+  const order = await createOrder({
+    accountId,
     storeId: schedule.store_id,
     supplierId: schedule.supplier_id,
     note,
     lines: sheet.lines,
+    createdBy,
+    scheduleId: id,
   });
-  db.prepare('UPDATE orders SET schedule_id = ? WHERE id = ?').run(id, order.id);
-  db.prepare('UPDATE order_schedules SET last_ordered_on = ?, last_order_id = ? WHERE id = ?')
-    .run(dueDate, order.id, id);
 
-  return { order, sheet, covered_date: dueDate, schedule: getSchedule(id) };
+  await db.run('UPDATE order_schedules SET last_ordered_on = :date, last_order_id = :order WHERE id = :id',
+    { date: dueDate, order: order.id, id });
+
+  return { order, sheet, covered_date: dueDate, schedule: await getSchedule(accountId, id) };
 }
 
 /** Raises drafts for every active schedule that is due and set to auto-draft. */
-function runDueSchedules() {
-  const due = listSchedules({ activeOnly: true }).filter((s) => s.due_date && s.auto_draft);
-  return due.map((s) => {
-    try { return { schedule_id: s.id, supplier: s.supplier_name, store: s.store_name, ...runSchedule(s.id) }; }
-    catch (err) { return { schedule_id: s.id, supplier: s.supplier_name, error: err.message }; }
-  });
+async function runDueSchedules(accountId, { storeIds = null, createdBy = null } = {}) {
+  const all = await listSchedules({ accountId, activeOnly: true, storeIds });
+  const due = all.filter((s) => s.due_date && s.auto_draft);
+
+  const results = [];
+  for (const schedule of due) {
+    try {
+      const run = await runSchedule(accountId, schedule.id, { createdBy });
+      results.push({ schedule_id: schedule.id, supplier: schedule.supplier_name, store: schedule.store_name, ...run });
+    } catch (err) {
+      results.push({ schedule_id: schedule.id, supplier: schedule.supplier_name, error: err.message });
+    }
+  }
+  return results;
 }
 
 /** The order days coming up in the next `days` days, for the calendar and dashboard. */
-function upcoming(days = 30) {
+async function upcoming(accountId, days = 30, { storeIds = null } = {}) {
   const from = todayIso();
   const to = addDays(from, days);
   const rows = [];
-  for (const schedule of listSchedules({ activeOnly: true })) {
-    if (schedule.due_date) {
-      rows.push({ date: schedule.due_date, schedule, status: schedule.status, is_due: true });
-    }
+
+  for (const schedule of await listSchedules({ accountId, activeOnly: true, storeIds })) {
+    if (schedule.due_date) rows.push({ date: schedule.due_date, schedule, status: schedule.status, is_due: true });
     for (const date of occurrencesBetween(schedule, from, to)) {
       if (schedule.due_date === date) continue;
       rows.push({ date, schedule, status: 'upcoming', is_due: false });
@@ -249,6 +297,12 @@ function upcoming(days = 30) {
 }
 
 function laterOf(a, b) { return b && b > a ? b : a; }
+
+/** Postgres hands back DATE as a string and TIMESTAMPTZ as a Date; both end up YYYY-MM-DD. */
+function dateOnly(value) {
+  if (!value) return '';
+  return (value instanceof Date ? value.toISOString() : String(value)).slice(0, 10);
+}
 
 function clampInt(value, min, max, fallback) {
   const n = Number(value);
@@ -268,5 +322,5 @@ function ordinal(n) {
 
 module.exports = {
   nextOccurrence, occurrencesBetween, scheduleStatus, describe, listSchedules, getSchedule,
-  saveSchedule, runSchedule, runDueSchedules, upcoming, WEEKDAYS, todayIso, addDays,
+  saveSchedule, runSchedule, runDueSchedules, upcoming, WEEKDAYS, todayIso, addDays, normalise,
 };

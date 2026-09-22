@@ -1,24 +1,59 @@
 // Shared helpers: API access, DOM building, formatting and toasts.
 
+import { token, refresh } from './session.js';
+
+function authHeaders(extra = {}) {
+  const bearer = token();
+  return { 'Content-Type': 'application/json', ...(bearer ? { Authorization: `Bearer ${bearer}` } : {}), ...extra };
+}
+
 export async function api(path, options = {}) {
   const res = await fetch(`/api${path}`, {
-    headers: { 'Content-Type': 'application/json' },
     ...options,
+    headers: authHeaders(options.headers),
     body: options.body && typeof options.body !== 'string' ? JSON.stringify(options.body) : options.body,
   });
+
   const text = await res.text();
   const data = text ? JSON.parse(text) : null;
+
+  if (res.status === 401) {
+    // The session expired or was signed out elsewhere: fall back to the sign-in screen.
+    await refresh();
+    window.dispatchEvent(new CustomEvent('session-changed'));
+  }
   if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
   return data;
 }
 
-export function download(path) {
-  const a = document.createElement('a');
-  a.href = `/api${path}`;
-  a.rel = 'noopener';
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+/**
+ * Downloads a CSV through fetch rather than a plain link, so the session token
+ * travels in a header instead of the URL.
+ */
+export async function download(path) {
+  try {
+    const res = await fetch(`/api${path}`, { headers: authHeaders() });
+    if (!res.ok) {
+      const body = await res.text();
+      let message = `Download failed (${res.status})`;
+      try { message = JSON.parse(body).error || message; } catch { /* not json */ }
+      throw new Error(message);
+    }
+
+    const disposition = res.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename="?([^"]+)"?/);
+    const url = URL.createObjectURL(await res.blob());
+
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = match ? match[1] : 'export.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  } catch (err) {
+    toast(err.message, 'bad');
+  }
 }
 
 /** el('div.card', { onclick }, [children]) — tiny hyperscript so views stay readable. */

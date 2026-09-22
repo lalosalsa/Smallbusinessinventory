@@ -1,26 +1,32 @@
 # Inventory & Ordering
 
-A small web app for running stock across two (or more) store locations: count what is on
-the shelf, keep every product tied to the supplier and SKU you buy it under, see how much
-you actually go through each week or month, and turn all of that into order sheets you can
-send straight to your suppliers.
+A web app for running stock across all of your locations: count what is on the shelf, keep
+every product tied to the supplier and SKU you buy it under, see how much you actually go
+through each week or month, and turn all of that into order sheets you can send straight
+to your suppliers.
 
-Everything runs on your own machine or server. Data lives in one SQLite file — no
-accounts, no subscriptions, no cloud.
+One account covers the whole business. Add your locations, invite the people who work
+there, and give each of them the access they need — nothing more.
+
+Data lives in **Postgres**, which means a [Supabase](https://supabase.com) project works
+out of the box.
 
 ---
 
 ## What it does
 
-- **Two stores side by side.** Every product carries its own par level, reorder point and
-  on-hand count per store, so the two locations never get mixed up.
+- **As many locations as you like.** Every product carries its own par level, reorder point
+  and on-hand count per location, so nothing gets mixed up between them.
+- **People, with roles and locations.** Owners run the account; managers run the
+  catalogue and the ordering; staff count stock. Each person is assigned the locations
+  they work in and sees only those.
 - **Products keyed to supplier SKUs.** One product can come from several suppliers, each
   with its own SKU, case size and price. Order sheets go out with the supplier's SKU on
   every line, which is what they need to fill it.
 - **Counting that takes a minute.** One screen, one box per product, Enter to move down
   the list. Works on a phone or tablet while you walk the stockroom.
-- **Usage over any period.** Week, month, quarter, year or a custom date range, broken
-  down by day, week or month, with the estimated cost of what you used.
+- **Usage over any period.** Week, month, quarter, year or a custom range, broken down by
+  day, week or month, with the estimated cost of what you used.
 - **Order sheets built for you.** Quantities suggested from your pars, from measured
   usage, or whichever is higher — rounded up to whole cases, with a warning when a draft
   is under the supplier's minimum.
@@ -28,32 +34,71 @@ accounts, no subscriptions, no cloud.
   the 1st", or any custom number of days. The app tells you what is due and builds the
   draft.
 - **CSV in and out.** Import your product list and count sheets from a spreadsheet; export
-  order sheets, stock, count sheets and usage reports back out.
+  order sheets per supplier, stock, count sheets and usage reports back out.
 
 ## Quick start
 
 ```bash
 npm install
-npm run seed      # optional: two demo stores, suppliers, products and 8 weeks of history
-npm start         # http://localhost:3000
+cp .env.example .env     # put your Supabase connection string in it
+npm start                # http://localhost:3000
 ```
 
-To start from an empty book instead, skip `npm run seed`, open **Stores** to name your two
-locations, then import your product list from **Import / export**.
+The tables are created on first boot. Open the app, create your sign-in, name the business
+and its locations, and you are running.
+
+Want something to look at first?
 
 ```bash
-npm test                 # 54 tests covering the usage maths, scheduling, CSV and the API
-npm run seed -- --reset  # wipe and reload the demo data
-PORT=8080 npm start      # serve on another port
-DB_PATH=/srv/inv.db npm start   # keep the database somewhere else
+npm run seed             # a demo account with 8 weeks of counts, orders and schedules
+                         # signs in as owner@example.com / password123
 ```
+
+`docs/supabase-setup.md` walks through getting the connection string and keys out of the
+Supabase dashboard, and covers the email-confirmation setting that catches people out.
+
+```bash
+npm test                 # 67 tests, run against a real Postgres
+npm run seed -- --reset  # wipe every account and reload the demo data
+PORT=8080 npm start      # serve on another port
+```
+
+### Sign-in
+
+Set `SUPABASE_URL` and `SUPABASE_ANON_KEY` and the app uses **Supabase Auth**: the browser
+signs in against Supabase, and the server checks the token on every request. Password
+resets and email confirmation come with it.
+
+Leave those unset and the app keeps its **own email/password sign-in** in the `local_users`
+table instead — handy for a laptop behind the counter, or for trying things out. Either
+way, the app's own `members` table decides who may do what.
 
 ---
 
+## Who can do what
+
+| | Owner | Manager | Staff |
+| --- | --- | --- | --- |
+| Count stock, import count sheets | ✓ | ✓ | ✓ |
+| See stock, usage and reports | ✓ | ✓ | ✓ |
+| Products, suppliers, pars, SKUs | ✓ | ✓ | |
+| Build, send and receive orders | ✓ | ✓ | |
+| Standing order days | ✓ | ✓ | |
+| Invite people, set roles | ✓ | | |
+| Add and remove locations | ✓ | | |
+
+Managers and staff see only the locations assigned to them — a barista at one shop cannot
+count, or even see, the stock at the other. Tick **every location** instead and that person
+follows the account as new locations are added. Owners always reach everything, and an
+account can never be left without one.
+
+Inviting someone is one step: **People → Invite someone**, with their email, a role and
+their locations. They join the account the first time they sign in with that address.
+
 ## The daily rhythm
 
-1. **Count.** *Stock & counts* → pick the store from the top-right chip, type what you
-   counted, **Save count**. That writes a dated count and resets on-hand for the store.
+1. **Count.** *Stock & counts* → pick the location from the top-right chip, type what you
+   counted, **Save count**. That writes a dated count and resets on-hand for that location.
 2. **Order.** When an order day comes up (*Order schedule*), hit **Build draft**. Adjust
    quantities, save, then **Export CSV for supplier**, **Copy as text** or **Email
    supplier**.
@@ -71,7 +116,7 @@ There is no till integration to set up. Usage comes out of stock movement:
 usage between two counts = earlier count + everything received in between - later count
 ```
 
-Each pair of consecutive counts for a product at a store is one segment, and a segment
+Each pair of consecutive counts for a product at a location is one segment, and a segment
 belongs to the period its closing count falls in — so a Monday-morning count closes the
 week that just ended. Two counts of a product is all it takes to get a number; count
 weekly and the weekly figures stay honest.
@@ -86,7 +131,7 @@ For each product a supplier carries, the app works out a target:
 
 | Mode | Target |
 | --- | --- |
-| Par level | the par you set for that store |
+| Par level | the par you set for that location |
 | Measured usage | average daily usage × days of cover |
 | Both (default) | whichever of the two is higher |
 
@@ -96,7 +141,7 @@ you ask for them.
 
 ## Standing order days
 
-*Order schedule* holds one entry per supplier + store, each repeating:
+*Order schedule* holds one entry per supplier + location, each repeating:
 
 - **Every week** on a chosen day
 - **Every 2 weeks** on a chosen day (the fortnightly rhythm counts forward from the start
@@ -136,13 +181,13 @@ under `public/samples/` and downloadable from the Import / export screen.
 | `pack_size` | case_size, units_per_case, pack_qty | Base units per case, e.g. 24 |
 | `pack_unit` | order_unit, purchase_unit | case, box, bag… |
 | `unit_cost` | cost, price, case_price | Price per case/pack |
-| `store_code` | store, location, site | `S1`, `S2` or the store's full name |
-| `par_level` | par, target | Target stock at that store |
+| `store_code` | store, location, site | The location's short code, or its full name |
+| `par_level` | par, target | Target stock at that location |
 | `reorder_point` | reorder, min, min_level | Flag the item at or below this |
-| `on_hand` | qty, stock, current_qty | Current stock at that store |
+| `on_hand` | qty, stock, current_qty | Current stock at that location |
 
 One row per product per supplier; add a second row with a different `store_code` to set
-pars for the other store. Re-importing the same file updates what is there rather than
+pars for another location. Re-importing the same file updates what is there rather than
 duplicating it, and the **product export uses exactly this format**, so you can export,
 edit in Excel and import straight back.
 
@@ -150,7 +195,7 @@ edit in Excel and import straight back.
 
 | Column | Also accepted | Meaning |
 | --- | --- | --- |
-| `store_code` | store, location | Optional if you pick a store on the import screen |
+| `store_code` | store, location | Optional if you pick a location on the import screen |
 | `sku` | supplier_sku, item_code | Matched first |
 | `product_name` | product, item | Used when there is no SKU |
 | `qty` | quantity, count, on_hand | **Required.** What you counted |
@@ -164,8 +209,9 @@ Rows that match nothing are reported line by line instead of failing the whole i
 | Export | Where |
 | --- | --- |
 | Order sheet for a supplier | the order screen → **Export CSV for supplier** |
+| Order sheet before saving an order | the order builder → **Export CSV now** |
 | Full product & SKU list | Import / export (round-trips back through the importer) |
-| Stock on hand per store | Import / export, or the stock screen |
+| Stock on hand per location | Import / export, or the stock screen |
 | Blank count sheet | Import / export, or the stock screen |
 | Usage report | the usage screen → **Export CSV** |
 
@@ -174,52 +220,70 @@ Rows that match nothing are reported line by line instead of failing the whole i
 ## How it is put together
 
 ```
-server.js              Express app: static files + /api
-src/db.js              SQLite schema, migrations, two starter stores
+server.js              Express app: static files + /api, migrations on boot
+sql/schema.sql         the whole Postgres schema, safe to re-run
+src/db.js              Postgres pool, :named parameters, transactions
+src/auth.js            Supabase Auth or local email/password sign-in
+src/accounts.js        accounts, members, invitations, roles, location access
 src/csv.js             CSV reader/writer with loose header matching
 src/usage.js           usage segments, reports, average daily usage
 src/orders.js          order suggestions, orders, receiving, supplier CSV
 src/schedules.js       standing order days and their date maths
 src/importer.js        product and count imports, product export
-src/api.js             the HTTP API
+src/api.js             the HTTP API, with the permission checks
 public/                the front end: vanilla ES modules, no build step
-scripts/seed.js        demo data
-test/                  node:test suite
+scripts/seed.js        demo account
+test/                  node:test suite, run against a real Postgres
 ```
 
 No build step and no front-end framework: the browser loads the ES modules directly, so
-what you edit is what runs. Dependencies are Express and better-sqlite3.
+what you edit is what runs.
+
+### Environment
+
+| Variable | Meaning |
+| --- | --- |
+| `DATABASE_URL` | **Required.** Postgres/Supabase connection string |
+| `SUPABASE_URL`, `SUPABASE_ANON_KEY` | Set both to sign in with Supabase Auth |
+| `PORT`, `HOST` | Where to listen (default `3000`, `0.0.0.0`) |
+| `SKIP_MIGRATE=1` | Do not apply `sql/schema.sql` at boot |
+| `PGSSL=disable` | For a plain local Postgres |
+| `AUTH_SECRET` | Signs local-mode tokens; generated and saved if unset |
+
+### Tests
+
+```bash
+createdb inv_test
+TEST_DATABASE_URL=postgres://localhost/inv_test npm test
+```
+
+They run against a real database rather than a stand-in, so the SQL that ships is the SQL
+that was tested. `test/accounts.test.js` is the one to keep an eye on: it holds the account
+and location boundaries in place.
 
 ### API
 
-All endpoints live under `/api` and speak JSON, except the `.csv` ones which return a file.
+All endpoints live under `/api`, speak JSON, and expect `Authorization: Bearer <token>`
+except the sign-in ones. Everything is scoped to the signed-in person's account.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/dashboard` | Per-store summary, open orders, due order days, top usage |
-| GET/POST/PUT/DELETE | `/stores`, `/suppliers`, `/products` | Reference data |
-| GET | `/inventory?store_id=&only=below_par` | Stock position for a store |
-| POST | `/counts` | Save a counting session |
-| POST | `/receipts` | Book stock in outside an order |
+| GET | `/auth/config` | Which sign-in mode the server is in |
+| POST | `/auth/register`, `/auth/login` | Local-mode sign-in |
+| GET | `/auth/me` | Who am I, my role, my locations |
+| POST | `/accounts` | Create the business (first run) |
+| GET/POST/PUT/DELETE | `/members`, `/members/invite`, `/invites/:id` | People |
+| GET/POST/PUT/DELETE | `/stores`, `/suppliers`, `/products` | Locations and catalogue |
+| GET | `/inventory?store_id=&only=below_par` | Stock position for a location |
+| POST | `/counts`, `/receipts` | Save a count; book stock in |
 | GET | `/usage?from=&to=&group_by=week` | Usage report (also `/usage/export.csv`) |
 | POST | `/orders/suggest` | Build a suggested order sheet |
+| GET | `/orders/sheet.csv?store_id=&supplier_id=` | That sheet as supplier CSV, unsaved |
 | GET/POST/PUT/DELETE | `/orders`, `/orders/:id` | Orders |
 | POST | `/orders/:id/status`, `/orders/:id/receive` | Send / receive an order |
 | GET | `/orders/:id/export.csv` | The supplier's copy |
 | GET/POST/PUT/DELETE | `/schedules`, `/schedules/:id` | Standing order days |
 | GET | `/schedules/upcoming?days=30` | Order-day calendar |
-| POST | `/schedules/:id/run` | Build the draft (`force` early, `skip` past it) |
-| POST | `/schedules/run-due` | Build every draft that is due |
+| POST | `/schedules/:id/run`, `/schedules/run-due` | Build drafts that are due |
 | POST | `/import/products`, `/import/counts` | CSV import |
 | GET | `/export/products.csv`, `/export/inventory.csv`, `/export/count-sheet.csv` | CSV export |
-
-### Backups
-
-Everything is in `data/inventory.db`. Copy that file and you have copied the lot.
-
-```bash
-cp data/inventory.db ~/backups/inventory-$(date +%F).db
-```
-
-The app is meant for a trusted network — a laptop behind the counter, or a small server on
-your own LAN. There is no login, so do not expose it to the open internet as it stands.

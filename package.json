@@ -2,17 +2,20 @@
   "name": "smallbusiness-inventory",
   "version": "1.0.0",
   "private": true,
-  "description": "Two-store inventory tracking, supplier/SKU catalog, usage reporting and supplier order sheets.",
+  "description": "Multi-location inventory tracking, supplier SKUs, usage reporting and supplier order sheets, on Supabase Postgres.",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
     "seed": "node scripts/seed.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test --test-concurrency=1 test/*.test.js"
   },
-  "engines": { "node": ">=18" },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "better-sqlite3": "^12.4.1",
-    "express": "^5.1.0"
+    "@supabase/supabase-js": "^2.116.0",
+    "express": "^5.1.0",
+    "pg": "^8.23.0"
   }
 }

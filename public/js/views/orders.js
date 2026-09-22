@@ -1,6 +1,7 @@
 import { api, el, qty, money, relative, toast, download, empty, select, table, confirmAction, dateOnly } from '../util.js';
 import { getState, activeStore, setActiveStore } from '../store.js';
 import { go } from '../router.js';
+import * as session from '../session.js';
 
 /* ------------------------------------------------------------- order list */
 
@@ -22,7 +23,7 @@ export async function ordersView(root) {
         el('h1', { text: 'Orders' }),
         el('p.muted', { text: 'Draft an order sheet from your pars and usage, export it as CSV for the supplier, then book the delivery back into stock.' }),
       ]),
-      el('button.btn', { text: 'New order sheet', onclick: () => go('/orders/new') }),
+      session.can('manage_orders') ? el('button.btn', { text: 'New order sheet', onclick: () => go('/orders/new') }) : null,
     ]),
     statusFilter,
     body,

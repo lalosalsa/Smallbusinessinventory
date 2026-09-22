@@ -3,7 +3,7 @@
 const { db } = require('./db');
 
 /**
- * Usage is inferred from stock movement, so it needs no POS integration:
+ * Usage is inferred from stock movement, so it needs no till integration:
  *
  *   usage between two counts = earlier count + everything received in between - later count
  *
@@ -14,8 +14,13 @@ const { db } = require('./db');
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-function toIso(d) { return new Date(d).toISOString().slice(0, 19).replace('T', ' '); }
-function dayKey(ts) { return String(ts).slice(0, 10); }
+function iso(value) {
+  if (!value) return '';
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function dayKey(ts) { return iso(ts).slice(0, 10); }
+function monthKey(ts) { return iso(ts).slice(0, 7); }
 
 function weekKey(ts) {
   // ISO week (Mon-Sun), rendered as 2026-W13.
@@ -27,8 +32,6 @@ function weekKey(ts) {
   return `${d.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
 }
 
-function monthKey(ts) { return String(ts).slice(0, 7); }
-
 function bucketKey(ts, groupBy) {
   if (groupBy === 'day') return dayKey(ts);
   if (groupBy === 'week') return weekKey(ts);
@@ -36,63 +39,76 @@ function bucketKey(ts, groupBy) {
   return 'total';
 }
 
+function windowBounds(from, to) {
+  return { start: `${from}T00:00:00.000Z`, end: `${to}T23:59:59.999Z` };
+}
+
 /**
- * Builds usage segments for the window, optionally filtered to one store or product.
- * Returns raw segments: { store_id, product_id, from, to, opening, received, closing, used }.
+ * Builds usage segments for the window.
+ * Returns { store_id, product_id, from, to, opening, received, closing, used }.
  */
-function usageSegments({ from, to, storeId = null, productId = null }) {
-  const params = { from: `${from} 00:00:00`, to: `${to} 23:59:59` };
-  let where = 'WHERE 1=1';
-  if (storeId) { where += ' AND c.store_id = @storeId'; params.storeId = Number(storeId); }
-  if (productId) { where += ' AND c.product_id = @productId'; params.productId = Number(productId); }
+async function usageSegments({ accountId, from, to, storeId = null, productId = null, storeIds = null }) {
+  const { start, end } = windowBounds(from, to);
+  const params = {
+    account: accountId,
+    storeId: storeId ? Number(storeId) : null,
+    productId: productId ? Number(productId) : null,
+    storeIds: storeIds && storeIds.length ? storeIds : null,
+  };
 
-  // Pull every count from one segment before the window so the first in-window
-  // segment has an opening count to measure against.
-  const counts = db.prepare(`
-    SELECT c.store_id, c.product_id, c.qty, c.counted_at
-    FROM counts c
-    ${where}
-    ORDER BY c.store_id, c.product_id, c.counted_at, c.id
-  `).all(params);
+  const scope = `
+    AND (:storeId::bigint IS NULL OR store_id = :storeId)
+    AND (:storeIds::bigint[] IS NULL OR store_id = ANY(:storeIds))
+    AND (:productId::bigint IS NULL OR product_id = :productId)
+  `;
 
-  const receiptRows = db.prepare(`
-    SELECT store_id, product_id, qty, received_at FROM receipts
+  const counts = await db.all(`
+    SELECT store_id, product_id, qty, counted_at
+    FROM counts
+    WHERE account_id = :account ${scope}
+    ORDER BY store_id, product_id, counted_at, id
+  `, params);
+
+  const receipts = await db.all(`
+    SELECT store_id, product_id, qty, received_at
+    FROM receipts
+    WHERE account_id = :account ${scope}
     ORDER BY store_id, product_id, received_at
-  `).all();
+  `, params);
 
   const receiptsByKey = new Map();
-  for (const r of receiptRows) {
-    const k = `${r.store_id}:${r.product_id}`;
-    if (!receiptsByKey.has(k)) receiptsByKey.set(k, []);
-    receiptsByKey.get(k).push(r);
+  for (const r of receipts) {
+    const key = `${r.store_id}:${r.product_id}`;
+    if (!receiptsByKey.has(key)) receiptsByKey.set(key, []);
+    receiptsByKey.get(key).push({ ...r, at: iso(r.received_at) });
   }
 
-  const byKey = new Map();
+  const countsByKey = new Map();
   for (const c of counts) {
-    const k = `${c.store_id}:${c.product_id}`;
-    if (!byKey.has(k)) byKey.set(k, []);
-    byKey.get(k).push(c);
+    const key = `${c.store_id}:${c.product_id}`;
+    if (!countsByKey.has(key)) countsByKey.set(key, []);
+    countsByKey.get(key).push({ ...c, at: iso(c.counted_at) });
   }
 
   const segments = [];
-  for (const [k, list] of byKey) {
-    const received = receiptsByKey.get(k) || [];
+  for (const [key, list] of countsByKey) {
+    const received = receiptsByKey.get(key) || [];
     for (let i = 1; i < list.length; i++) {
       const prev = list[i - 1];
       const next = list[i];
-      if (next.counted_at < params.from || next.counted_at > params.to) continue;
+      if (next.at < start || next.at > end) continue;
       const receivedQty = received
-        .filter((r) => r.received_at > prev.counted_at && r.received_at <= next.counted_at)
-        .reduce((sum, r) => sum + r.qty, 0);
-      const used = prev.qty + receivedQty - next.qty;
+        .filter((r) => r.at > prev.at && r.at <= next.at)
+        .reduce((sum, r) => sum + Number(r.qty), 0);
+      const used = Number(prev.qty) + receivedQty - Number(next.qty);
       segments.push({
         store_id: next.store_id,
         product_id: next.product_id,
-        from: prev.counted_at,
-        to: next.counted_at,
-        opening: prev.qty,
+        from: prev.at,
+        to: next.at,
+        opening: Number(prev.qty),
         received: receivedQty,
-        closing: next.qty,
+        closing: Number(next.qty),
         // Negative means more was counted than could have arrived: a miscount or an
         // unrecorded delivery. It is clamped so it cannot cancel out real usage.
         used: Math.max(0, used),
@@ -103,16 +119,22 @@ function usageSegments({ from, to, storeId = null, productId = null }) {
   return segments;
 }
 
-/** Usage rolled up per product (and optionally bucketed by day/week/month). */
-function usageReport({ from, to, storeId = null, productId = null, groupBy = 'total', category = null }) {
-  const segments = usageSegments({ from, to, storeId, productId });
+/** Usage rolled up per product, optionally bucketed by day/week/month. */
+async function usageReport({ accountId, from, to, storeId = null, productId = null, storeIds = null, groupBy = 'total', category = null }) {
+  const segments = await usageSegments({ accountId, from, to, storeId, productId, storeIds });
 
-  const products = new Map(db.prepare('SELECT id, name, category, base_unit FROM products').all().map((p) => [p.id, p]));
-  const stores = new Map(db.prepare('SELECT id, name, code FROM stores').all().map((s) => [s.id, s]));
-  const cost = new Map(db.prepare(`
-    SELECT product_id, MIN(unit_cost / NULLIF(pack_size, 0)) AS unit_cost
-    FROM product_suppliers GROUP BY product_id
-  `).all().map((r) => [r.product_id, r.unit_cost || 0]));
+  const [productRows, storeRows, costRows] = await Promise.all([
+    db.all('SELECT id, name, category, base_unit FROM products WHERE account_id = :account', { account: accountId }),
+    db.all('SELECT id, name, code FROM stores WHERE account_id = :account', { account: accountId }),
+    db.all(`
+      SELECT product_id, MIN(unit_cost / NULLIF(pack_size, 0)) AS unit_cost
+      FROM product_suppliers WHERE account_id = :account GROUP BY product_id
+    `, { account: accountId }),
+  ]);
+
+  const products = new Map(productRows.map((p) => [p.id, p]));
+  const stores = new Map(storeRows.map((s) => [s.id, s]));
+  const cost = new Map(costRows.map((r) => [r.product_id, Number(r.unit_cost) || 0]));
 
   const rows = new Map();
   const buckets = new Set();
@@ -159,7 +181,6 @@ function usageReport({ from, to, storeId = null, productId = null, groupBy = 'to
     for (const k of Object.keys(row.buckets)) row.buckets[k] = round(row.buckets[k]);
   }
 
-  const sortedBuckets = [...buckets].sort();
   const list = [...rows.values()].sort((a, b) => b.used - a.used || a.product_name.localeCompare(b.product_name));
 
   return {
@@ -167,7 +188,7 @@ function usageReport({ from, to, storeId = null, productId = null, groupBy = 'to
     to,
     days,
     group_by: groupBy,
-    buckets: sortedBuckets,
+    buckets: [...buckets].sort(),
     rows: list,
     totals: {
       used: round(list.reduce((s, r) => s + r.used, 0)),
@@ -177,21 +198,23 @@ function usageReport({ from, to, storeId = null, productId = null, groupBy = 'to
   };
 }
 
-/** Average daily usage per (store, product) over a lookback window, for order suggestions. */
-function averageDailyUsage({ storeId, lookbackDays = 28 }) {
-  const to = toIso(Date.now()).slice(0, 10);
-  const from = toIso(Date.now() - lookbackDays * DAY_MS).slice(0, 10);
-  const segments = usageSegments({ from, to, storeId });
-  const map = new Map();
+/** Average daily usage per product over a lookback window, for order suggestions. */
+async function averageDailyUsage({ accountId, storeId, lookbackDays = 28 }) {
+  const to = new Date().toISOString().slice(0, 10);
+  const from = new Date(Date.now() - lookbackDays * DAY_MS).toISOString().slice(0, 10);
+  const segments = await usageSegments({ accountId, from, to, storeId });
+
+  const totals = new Map();
   for (const seg of segments) {
-    const span = Math.max(1, (new Date(seg.to.replace(' ', 'T') + 'Z') - new Date(seg.from.replace(' ', 'T') + 'Z')) / DAY_MS);
-    const cur = map.get(seg.product_id) || { used: 0, days: 0 };
-    cur.used += seg.used;
-    cur.days += span;
-    map.set(seg.product_id, cur);
+    const span = Math.max(1, (new Date(seg.to) - new Date(seg.from)) / DAY_MS);
+    const current = totals.get(seg.product_id) || { used: 0, days: 0 };
+    current.used += seg.used;
+    current.days += span;
+    totals.set(seg.product_id, current);
   }
+
   const out = new Map();
-  for (const [productId, v] of map) out.set(productId, v.days > 0 ? v.used / v.days : 0);
+  for (const [productId, v] of totals) out.set(productId, v.days > 0 ? v.used / v.days : 0);
   return out;
 }
 
@@ -200,4 +223,4 @@ function round(n, places = 2) {
   return Math.round((Number(n) + Number.EPSILON) * f) / f;
 }
 
-module.exports = { usageSegments, usageReport, averageDailyUsage, bucketKey, weekKey, monthKey, round, toIso, DAY_MS };
+module.exports = { usageSegments, usageReport, averageDailyUsage, bucketKey, weekKey, monthKey, round, iso, DAY_MS };

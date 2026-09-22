@@ -1,6 +1,7 @@
 import { api, el, money, qty, relative, empty, table, download } from '../util.js';
 import { setActiveStore } from '../store.js';
 import { go } from '../router.js';
+import * as session from '../session.js';
 
 export async function dashboardView(root) {
   const data = await api('/dashboard');
@@ -19,7 +20,7 @@ export async function dashboardView(root) {
     el('p.muted', { text: `Last count ${relative(s.last_count)} · stock updated ${relative(s.last_update)}` }),
     el('div.row.gap', {}, [
       el('button.btn', { text: 'Count stock', onclick: () => { setActiveStore(s.id); go('/inventory'); } }),
-      el('button.btn.ghost', { text: 'Build order', onclick: () => { setActiveStore(s.id); go('/orders/new'); } }),
+      session.can('manage_orders') ? el('button.btn.ghost', { text: 'Build order', onclick: () => { setActiveStore(s.id); go('/orders/new'); } }) : null,
       el('button.btn.ghost', { text: 'Export count sheet', onclick: () => download(`/export/count-sheet.csv?store_id=${s.id}`) }),
     ]),
   ]));
@@ -60,8 +61,8 @@ export async function dashboardView(root) {
         el('p.muted', { text: `${data.counts.products} products · ${data.counts.suppliers} suppliers · ${data.counts.skus} supplier SKUs` }),
       ]),
       el('div.row.gap', {}, [
-        el('button.btn', { text: 'New order', onclick: () => go('/orders/new') }),
-        el('button.btn.ghost', { text: 'Import CSV', onclick: () => go('/data') }),
+        session.can('manage_orders') ? el('button.btn', { text: 'New order', onclick: () => go('/orders/new') }) : null,
+        session.can('manage_catalog') ? el('button.btn.ghost', { text: 'Import CSV', onclick: () => go('/data') }) : null,
       ]),
     ]),
     dueRows.length

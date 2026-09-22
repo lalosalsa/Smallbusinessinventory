@@ -1,217 +1,396 @@
 'use strict';
 
 const express = require('express');
-const { db } = require('./db');
+const { db, tx } = require('./db');
+const auth = require('./auth');
+const accounts = require('./accounts');
 const { usageReport, usageSegments, round } = require('./usage');
-const { suggestOrder, createOrder, getOrder, receiveOrder, orderToCsv, suggestionToCsv, httpError } = require('./orders');
-const { importProducts, importCounts, exportProductsCsv } = require('./importer');
+const { suggestOrder, createOrder, getOrder, receiveOrder, orderToCsv, suggestionToCsv, stampFor, httpError } = require('./orders');
 const schedules = require('./schedules');
+const { importProducts, importCounts, exportProductsCsv } = require('./importer');
 const { toCsv } = require('./csv');
 
 const router = express.Router();
 
-/* ------------------------------------------------------------------ stores */
+/* ------------------------------------------------------------ sign-in layer */
 
-router.get('/stores', (req, res) => {
-  res.json(db.prepare('SELECT * FROM stores ORDER BY name').all());
+/** Reads the bearer token, if there is one, and hangs the user and membership off the request. */
+router.use(async (req, res, next) => {
+  const header = req.get('authorization') || '';
+  const token = header.startsWith('Bearer ') ? header.slice(7).trim() : '';
+  req.token = token || null;
+  req.user = token ? await auth.verifyToken(token) : null;
+  req.member = req.user ? await accounts.membershipFor(req.user) : null;
+  next();
 });
 
-router.post('/stores', (req, res) => {
+function requireUser(req) {
+  if (!req.user) throw httpError(401, 'Sign in to continue');
+  return req.user;
+}
+
+function requireMember(req, action = 'view') {
+  requireUser(req);
+  if (!req.member) throw httpError(403, 'Your sign-in is not attached to an account yet');
+  accounts.assertCan(req.member, action);
+  return req.member;
+}
+
+/** The locations this request may touch: the one asked for, or all the member can reach. */
+function scopeStores(member, requestedStoreId) {
+  if (requestedStoreId) return [accounts.assertStoreAccess(member, requestedStoreId)];
+  return member.store_ids;
+}
+
+router.get('/auth/config', (req, res) => res.json(auth.publicConfig()));
+
+router.post('/auth/register', async (req, res) => {
+  const { email, password, display_name = '' } = req.body || {};
+  res.status(201).json(await auth.registerLocalUser({ email, password, display_name }));
+});
+
+router.post('/auth/login', async (req, res) => {
+  const { email, password } = req.body || {};
+  res.json(await auth.loginLocal({ email, password }));
+});
+
+router.post('/auth/password', async (req, res) => {
+  const user = requireUser(req);
+  res.json(await auth.changeLocalPassword(user.id, req.body || {}));
+});
+
+router.post('/auth/logout', (req, res) => {
+  if (req.token) auth.forgetToken(req.token);
+  res.json({ ok: true });
+});
+
+/** Who am I, what account am I on, and what am I allowed to do. */
+router.get('/auth/me', async (req, res) => {
+  if (!req.user) return res.json({ user: null, member: null, mode: auth.authMode() });
+  const member = req.member;
+  const stores = member
+    ? await db.all('SELECT * FROM stores WHERE account_id = :account AND id = ANY(:ids) ORDER BY name',
+      { account: member.account_id, ids: member.store_ids.length ? member.store_ids : [0] })
+    : [];
+  res.json({
+    mode: auth.authMode(),
+    user: req.user,
+    member: member && {
+      id: member.id,
+      account_id: member.account_id,
+      account_name: member.account_name,
+      email: member.email,
+      display_name: member.display_name,
+      role: member.role,
+      all_locations: member.all_locations,
+      permissions: member.permissions,
+      store_ids: member.store_ids,
+    },
+    stores,
+  });
+});
+
+/** First run: a signed-in person with no account creates the business. */
+router.post('/accounts', async (req, res) => {
+  const user = requireUser(req);
+  const { name, locations } = req.body || {};
+  const member = await accounts.createAccount(user, { name, locations });
+  res.status(201).json(member);
+});
+
+router.put('/accounts', async (req, res) => {
+  const member = requireMember(req, 'manage_account');
+  const { name } = req.body || {};
+  if (!String(name || '').trim()) throw httpError(400, 'Give the business a name');
+  res.json(await db.one('UPDATE accounts SET name = :name WHERE id = :id RETURNING *',
+    { name: String(name).trim(), id: member.account_id }));
+});
+
+/* ------------------------------------------------------------------ people */
+
+router.get('/members', async (req, res) => {
+  const member = requireMember(req, 'view');
+  res.json({
+    members: await accounts.listMembers(member.account_id),
+    invites: accounts.can(member, 'manage_account') ? await accounts.listInvites(member.account_id) : [],
+    roles: accounts.ROLES,
+    me: member.id,
+  });
+});
+
+router.post('/members/invite', async (req, res) => {
+  const member = requireMember(req, 'manage_account');
+  res.status(201).json(await accounts.inviteMember(member, req.body || {}));
+});
+
+router.put('/members/:id', async (req, res) => {
+  const member = requireMember(req, 'manage_account');
+  res.json(await accounts.updateMember(member, req.params.id, req.body || {}));
+});
+
+router.delete('/members/:id', async (req, res) => {
+  const member = requireMember(req, 'manage_account');
+  res.json(await accounts.removeMember(member, req.params.id));
+});
+
+router.delete('/invites/:id', async (req, res) => {
+  const member = requireMember(req, 'manage_account');
+  res.json(await accounts.revokeInvite(member, req.params.id));
+});
+
+/* --------------------------------------------------------------- locations */
+
+router.get('/stores', async (req, res) => {
+  const member = requireMember(req, 'view');
+  res.json(await db.all(`
+    SELECT * FROM stores WHERE account_id = :account AND id = ANY(:ids) ORDER BY name
+  `, { account: member.account_id, ids: member.store_ids.length ? member.store_ids : [0] }));
+});
+
+router.post('/stores', async (req, res) => {
+  const member = requireMember(req, 'manage_account');
   const { name, code, address = '' } = req.body || {};
-  if (!name || !code) throw httpError(400, 'A store needs a name and a short code');
-  const id = db.prepare('INSERT INTO stores (name, code, address) VALUES (?, ?, ?)').run(name.trim(), code.trim(), address).lastInsertRowid;
-  res.status(201).json(db.prepare('SELECT * FROM stores WHERE id = ?').get(id));
+  if (!name || !code) throw httpError(400, 'A location needs a name and a short code');
+  res.status(201).json(await db.one(`
+    INSERT INTO stores (account_id, name, code, address) VALUES (:account, :name, :code, :address) RETURNING *
+  `, { account: member.account_id, name: String(name).trim(), code: String(code).trim().toUpperCase(), address }));
 });
 
-router.put('/stores/:id', (req, res) => {
-  const { name, code, address = '', active = 1 } = req.body || {};
-  db.prepare('UPDATE stores SET name = ?, code = ?, address = ?, active = ? WHERE id = ?')
-    .run(name, code, address, active ? 1 : 0, req.params.id);
-  res.json(db.prepare('SELECT * FROM stores WHERE id = ?').get(req.params.id));
+router.put('/stores/:id', async (req, res) => {
+  const member = requireMember(req, 'manage_account');
+  const { name, code, address = '', active = true } = req.body || {};
+  const store = await db.one(`
+    UPDATE stores SET name = :name, code = :code, address = :address, active = :active
+    WHERE id = :id AND account_id = :account RETURNING *
+  `, { name, code: String(code).toUpperCase(), address, active: !!active, id: req.params.id, account: member.account_id });
+  if (!store) throw httpError(404, 'Location not found');
+  res.json(store);
 });
 
-router.delete('/stores/:id', (req, res) => {
-  db.prepare('DELETE FROM stores WHERE id = ?').run(req.params.id);
+router.delete('/stores/:id', async (req, res) => {
+  const member = requireMember(req, 'manage_account');
+  const remaining = await db.value('SELECT count(*)::int FROM stores WHERE account_id = :account', { account: member.account_id });
+  if (remaining <= 1) throw httpError(400, 'An account needs at least one location');
+  await db.run('DELETE FROM stores WHERE id = :id AND account_id = :account', { id: req.params.id, account: member.account_id });
   res.json({ ok: true });
 });
 
 /* --------------------------------------------------------------- suppliers */
 
-const SUPPLIER_FIELDS = ['name', 'contact_name', 'email', 'phone', 'account_number', 'order_days', 'lead_time_days', 'min_order_value', 'notes', 'active'];
+const SUPPLIER_FIELDS = {
+  name: 'name', contact_name: 'contactName', email: 'email', phone: 'phone',
+  account_number: 'accountNumber', order_days: 'orderDays', lead_time_days: 'leadTime',
+  min_order_value: 'minOrder', notes: 'notes', active: 'active',
+};
 
-router.get('/suppliers', (req, res) => {
-  res.json(db.prepare(`
-    SELECT v.*,
-           (SELECT COUNT(*) FROM product_suppliers ps WHERE ps.supplier_id = v.id) AS product_count
-    FROM suppliers v ORDER BY v.name
-  `).all());
+function supplierPayload(body) {
+  return {
+    name: String(body.name || '').trim(),
+    contactName: body.contact_name || '',
+    email: body.email || '',
+    phone: body.phone || '',
+    accountNumber: body.account_number || '',
+    orderDays: body.order_days || '',
+    leadTime: Number(body.lead_time_days) || 0,
+    minOrder: Number(body.min_order_value) || 0,
+    notes: body.notes || '',
+    active: body.active === false ? false : true,
+  };
+}
+
+router.get('/suppliers', async (req, res) => {
+  const member = requireMember(req, 'view');
+  res.json(await db.all(`
+    SELECT v.*, (SELECT count(*)::int FROM product_suppliers ps WHERE ps.supplier_id = v.id) AS product_count
+    FROM suppliers v WHERE v.account_id = :account ORDER BY v.name
+  `, { account: member.account_id }));
 });
 
-router.post('/suppliers', (req, res) => {
-  const body = pick(req.body, SUPPLIER_FIELDS);
-  if (!body.name) throw httpError(400, 'A supplier needs a name');
-  const cols = Object.keys(body);
-  const id = db.prepare(`INSERT INTO suppliers (${cols.join(',')}) VALUES (${cols.map((c) => '@' + c).join(',')})`)
-    .run(body).lastInsertRowid;
-  res.status(201).json(db.prepare('SELECT * FROM suppliers WHERE id = ?').get(id));
+router.post('/suppliers', async (req, res) => {
+  const member = requireMember(req, 'manage_catalog');
+  const payload = supplierPayload(req.body || {});
+  if (!payload.name) throw httpError(400, 'A supplier needs a name');
+  const columns = Object.keys(SUPPLIER_FIELDS);
+  res.status(201).json(await db.one(`
+    INSERT INTO suppliers (account_id, ${columns.join(', ')})
+    VALUES (:account, ${columns.map((c) => `:${SUPPLIER_FIELDS[c]}`).join(', ')}) RETURNING *
+  `, { ...payload, account: member.account_id }));
 });
 
-router.put('/suppliers/:id', (req, res) => {
-  const body = pick(req.body, SUPPLIER_FIELDS);
-  const cols = Object.keys(body);
-  if (cols.length) {
-    db.prepare(`UPDATE suppliers SET ${cols.map((c) => `${c} = @${c}`).join(', ')} WHERE id = @id`)
-      .run({ ...body, id: Number(req.params.id) });
-  }
-  res.json(db.prepare('SELECT * FROM suppliers WHERE id = ?').get(req.params.id));
+router.put('/suppliers/:id', async (req, res) => {
+  const member = requireMember(req, 'manage_catalog');
+  const payload = supplierPayload(req.body || {});
+  const sets = Object.keys(SUPPLIER_FIELDS).map((c) => `${c} = :${SUPPLIER_FIELDS[c]}`).join(', ');
+  const supplier = await db.one(`UPDATE suppliers SET ${sets} WHERE id = :id AND account_id = :account RETURNING *`,
+    { ...payload, id: req.params.id, account: member.account_id });
+  if (!supplier) throw httpError(404, 'Supplier not found');
+  res.json(supplier);
 });
 
-router.delete('/suppliers/:id', (req, res) => {
-  db.prepare('DELETE FROM suppliers WHERE id = ?').run(req.params.id);
+router.delete('/suppliers/:id', async (req, res) => {
+  const member = requireMember(req, 'manage_catalog');
+  await db.run('DELETE FROM suppliers WHERE id = :id AND account_id = :account', { id: req.params.id, account: member.account_id });
   res.json({ ok: true });
 });
 
 /* ---------------------------------------------------------------- products */
 
-router.get('/products', (req, res) => {
+router.get('/products', async (req, res) => {
+  const member = requireMember(req, 'view');
   const { search = '', supplier_id = '', category = '' } = req.query;
-  const rows = db.prepare(`
-    SELECT p.*,
-           (SELECT GROUP_CONCAT(v.name || ' (' || ps.sku || ')', ' | ')
-              FROM product_suppliers ps JOIN suppliers v ON v.id = ps.supplier_id
-             WHERE ps.product_id = p.id) AS supplier_summary
-    FROM p_filtered p ORDER BY p.category, p.name
-  `.replace('p_filtered', 'products')).all();
 
-  let list = rows;
+  const products = await db.all(`
+    SELECT p.* FROM products p WHERE p.account_id = :account ORDER BY p.category, p.name
+  `, { account: member.account_id });
+
+  const links = await db.all(`
+    SELECT ps.*, v.name AS supplier_name FROM product_suppliers ps
+    JOIN suppliers v ON v.id = ps.supplier_id WHERE ps.account_id = :account
+  `, { account: member.account_id });
+
+  const stock = await db.all(`
+    SELECT * FROM store_products WHERE account_id = :account AND store_id = ANY(:ids)
+  `, { account: member.account_id, ids: member.store_ids.length ? member.store_ids : [0] });
+
+  let list = products.map((p) => ({
+    ...p,
+    suppliers: links.filter((l) => l.product_id === p.id),
+    stock: stock.filter((s) => s.product_id === p.id),
+  }));
+
   if (search) {
     const q = String(search).toLowerCase();
-    const skuMatches = new Set(db.prepare('SELECT product_id FROM product_suppliers WHERE sku LIKE ?').all(`%${search}%`).map((r) => r.product_id));
-    list = list.filter((p) => p.name.toLowerCase().includes(q) || (p.category || '').toLowerCase().includes(q) || skuMatches.has(p.id));
+    list = list.filter((p) => p.name.toLowerCase().includes(q)
+      || (p.category || '').toLowerCase().includes(q)
+      || p.suppliers.some((l) => (l.sku || '').toLowerCase().includes(q)));
   }
   if (category) list = list.filter((p) => (p.category || '') === category);
-  if (supplier_id) {
-    const ids = new Set(db.prepare('SELECT product_id FROM product_suppliers WHERE supplier_id = ?').all(supplier_id).map((r) => r.product_id));
-    list = list.filter((p) => ids.has(p.id));
-  }
+  if (supplier_id) list = list.filter((p) => p.suppliers.some((l) => String(l.supplier_id) === String(supplier_id)));
 
-  const links = db.prepare(`
-    SELECT ps.*, v.name AS supplier_name FROM product_suppliers ps JOIN suppliers v ON v.id = ps.supplier_id
-  `).all();
-  const stock = db.prepare('SELECT * FROM store_products').all();
-
-  for (const p of list) {
-    p.suppliers = links.filter((l) => l.product_id === p.id);
-    p.stock = stock.filter((s) => s.product_id === p.id);
-  }
   res.json(list);
 });
 
-router.get('/categories', (req, res) => {
-  res.json(db.prepare("SELECT DISTINCT category FROM products WHERE category <> '' ORDER BY category").all().map((r) => r.category));
+router.get('/categories', async (req, res) => {
+  const member = requireMember(req, 'view');
+  const rows = await db.all(`
+    SELECT DISTINCT category FROM products WHERE account_id = :account AND category <> '' ORDER BY category
+  `, { account: member.account_id });
+  res.json(rows.map((r) => r.category));
 });
 
-router.post('/products', (req, res) => {
+router.post('/products', async (req, res) => {
+  const member = requireMember(req, 'manage_catalog');
   const { name, category = '', base_unit = 'each', notes = '', suppliers = [], stock = [] } = req.body || {};
   if (!name) throw httpError(400, 'A product needs a name');
-  const out = db.transaction(() => {
-    const id = db.prepare('INSERT INTO products (name, category, base_unit, notes) VALUES (?, ?, ?, ?)')
-      .run(name.trim(), category, base_unit, notes).lastInsertRowid;
-    saveProductLinks(id, suppliers);
-    saveProductStock(id, stock);
-    return id;
-  })();
-  res.status(201).json(db.prepare('SELECT * FROM products WHERE id = ?').get(out));
+
+  const product = await tx(async (t) => {
+    const created = await t.one(`
+      INSERT INTO products (account_id, name, category, base_unit, notes)
+      VALUES (:account, :name, :category, :unit, :notes) RETURNING *
+    `, { account: member.account_id, name: String(name).trim(), category, unit: base_unit, notes });
+    await saveProductLinks(t, member, created.id, suppliers);
+    await saveProductStock(t, member, created.id, stock);
+    return created;
+  });
+  res.status(201).json(product);
 });
 
-router.put('/products/:id', (req, res) => {
+router.put('/products/:id', async (req, res) => {
+  const member = requireMember(req, 'manage_catalog');
   const id = Number(req.params.id);
-  const { name, category = '', base_unit = 'each', notes = '', active = 1, suppliers, stock } = req.body || {};
-  db.transaction(() => {
-    db.prepare('UPDATE products SET name = ?, category = ?, base_unit = ?, notes = ?, active = ? WHERE id = ?')
-      .run(name, category, base_unit, notes, active ? 1 : 0, id);
-    if (Array.isArray(suppliers)) saveProductLinks(id, suppliers, true);
-    if (Array.isArray(stock)) saveProductStock(id, stock);
-  })();
-  res.json(db.prepare('SELECT * FROM products WHERE id = ?').get(id));
+  const { name, category = '', base_unit = 'each', notes = '', active = true, suppliers, stock } = req.body || {};
+
+  const product = await tx(async (t) => {
+    const updated = await t.one(`
+      UPDATE products SET name = :name, category = :category, base_unit = :unit, notes = :notes, active = :active
+      WHERE id = :id AND account_id = :account RETURNING *
+    `, { name, category, unit: base_unit, notes, active: !!active, id, account: member.account_id });
+    if (!updated) throw httpError(404, 'Product not found');
+    if (Array.isArray(suppliers)) await saveProductLinks(t, member, id, suppliers, true);
+    if (Array.isArray(stock)) await saveProductStock(t, member, id, stock);
+    return updated;
+  });
+  res.json(product);
 });
 
-router.delete('/products/:id', (req, res) => {
-  db.prepare('DELETE FROM products WHERE id = ?').run(req.params.id);
+router.delete('/products/:id', async (req, res) => {
+  const member = requireMember(req, 'manage_catalog');
+  await db.run('DELETE FROM products WHERE id = :id AND account_id = :account', { id: req.params.id, account: member.account_id });
   res.json({ ok: true });
 });
 
-function saveProductLinks(productId, links, replace = false) {
+async function saveProductLinks(t, member, productId, links, replace = false) {
   if (replace) {
-    const keep = links.filter((l) => l.id).map((l) => l.id);
-    const placeholders = keep.length ? keep.map(() => '?').join(',') : null;
-    db.prepare(`DELETE FROM product_suppliers WHERE product_id = ?${placeholders ? ` AND id NOT IN (${placeholders})` : ''}`)
-      .run(productId, ...keep);
+    const keep = links.map((l) => Number(l.id)).filter(Boolean);
+    await t.run(`
+      DELETE FROM product_suppliers WHERE product_id = :product AND account_id = :account
+        AND (:keep::bigint[] IS NULL OR NOT (id = ANY(:keep)))
+    `, { product: productId, account: member.account_id, keep: keep.length ? keep : null });
   }
-  for (const l of links) {
-    if (!l.supplier_id || !l.sku) continue;
+
+  for (const link of links) {
+    if (!link.supplier_id || !link.sku) continue;
     const payload = {
-      product_id: productId,
-      supplier_id: Number(l.supplier_id),
-      sku: String(l.sku).trim(),
-      pack_size: Number(l.pack_size) || 1,
-      pack_unit: l.pack_unit || 'case',
-      unit_cost: Number(l.unit_cost) || 0,
-      is_primary: l.is_primary ? 1 : 0,
+      account: member.account_id,
+      product: productId,
+      supplier: Number(link.supplier_id),
+      sku: String(link.sku).trim(),
+      packSize: Number(link.pack_size) || 1,
+      packUnit: link.pack_unit || 'case',
+      cost: Number(link.unit_cost) || 0,
+      primary: !!link.is_primary,
     };
-    const existing = db.prepare('SELECT id FROM product_suppliers WHERE product_id = ? AND supplier_id = ?')
-      .get(productId, payload.supplier_id);
-    if (existing) {
-      db.prepare(`UPDATE product_suppliers SET sku = @sku, pack_size = @pack_size, pack_unit = @pack_unit,
-                  unit_cost = @unit_cost, is_primary = @is_primary WHERE id = @id`).run({ ...payload, id: existing.id });
-    } else {
-      db.prepare(`INSERT INTO product_suppliers (product_id, supplier_id, sku, pack_size, pack_unit, unit_cost, is_primary)
-                  VALUES (@product_id, @supplier_id, @sku, @pack_size, @pack_unit, @unit_cost, @is_primary)`).run(payload);
-    }
+    await t.run(`
+      INSERT INTO product_suppliers (account_id, product_id, supplier_id, sku, pack_size, pack_unit, unit_cost, is_primary)
+      VALUES (:account, :product, :supplier, :sku, :packSize, :packUnit, :cost, :primary)
+      ON CONFLICT (product_id, supplier_id) DO UPDATE SET
+        sku = excluded.sku, pack_size = excluded.pack_size, pack_unit = excluded.pack_unit,
+        unit_cost = excluded.unit_cost, is_primary = excluded.is_primary
+    `, payload);
   }
 }
 
-function saveProductStock(productId, stock) {
-  for (const s of stock || []) {
-    if (!s.store_id) continue;
-    db.prepare(`
-      INSERT INTO store_products (store_id, product_id, par_level, reorder_point, on_hand, updated_at)
-      VALUES (@store_id, @product_id, @par_level, @reorder_point, @on_hand, datetime('now'))
+async function saveProductStock(t, member, productId, stock) {
+  for (const row of stock || []) {
+    if (!row.store_id) continue;
+    const storeId = accounts.assertStoreAccess(member, row.store_id);
+    await t.run(`
+      INSERT INTO store_products (account_id, store_id, product_id, par_level, reorder_point, on_hand, updated_at)
+      VALUES (:account, :store, :product, :par, :reorder, :onHand, now())
       ON CONFLICT (store_id, product_id) DO UPDATE SET
         par_level = excluded.par_level, reorder_point = excluded.reorder_point,
-        on_hand = excluded.on_hand, updated_at = datetime('now')
-    `).run({
-      store_id: Number(s.store_id),
-      product_id: productId,
-      par_level: Number(s.par_level) || 0,
-      reorder_point: Number(s.reorder_point) || 0,
-      on_hand: Number(s.on_hand) || 0,
+        on_hand = excluded.on_hand, updated_at = now()
+    `, {
+      account: member.account_id, store: storeId, product: productId,
+      par: Number(row.par_level) || 0,
+      reorder: Number(row.reorder_point) || 0,
+      onHand: Number(row.on_hand) || 0,
     });
   }
 }
 
 /* --------------------------------------------------------------- inventory */
 
-router.get('/inventory', (req, res) => {
-  const storeId = Number(req.query.store_id);
-  if (!storeId) throw httpError(400, 'store_id is required');
+router.get('/inventory', async (req, res) => {
+  const member = requireMember(req, 'view');
+  const storeId = accounts.assertStoreAccess(member, req.query.store_id);
   const { search = '', supplier_id = '', category = '', only = '' } = req.query;
 
-  let rows = db.prepare(`
+  let rows = await db.all(`
     SELECT p.id AS product_id, p.name AS product_name, p.category, p.base_unit,
            COALESCE(sp.on_hand, 0) AS on_hand,
            COALESCE(sp.par_level, 0) AS par_level,
            COALESCE(sp.reorder_point, 0) AS reorder_point,
            sp.updated_at,
            ps.supplier_id, v.name AS supplier_name, ps.sku, ps.pack_size, ps.pack_unit, ps.unit_cost,
-           (SELECT MAX(counted_at) FROM counts c WHERE c.store_id = @storeId AND c.product_id = p.id) AS last_counted
+           (SELECT max(counted_at) FROM counts c WHERE c.store_id = :storeId AND c.product_id = p.id) AS last_counted
     FROM products p
-    LEFT JOIN store_products sp ON sp.product_id = p.id AND sp.store_id = @storeId
-    LEFT JOIN product_suppliers ps ON ps.product_id = p.id AND ps.is_primary = 1
+    LEFT JOIN store_products sp ON sp.product_id = p.id AND sp.store_id = :storeId
+    LEFT JOIN product_suppliers ps ON ps.product_id = p.id AND ps.is_primary
     LEFT JOIN suppliers v ON v.id = ps.supplier_id
-    WHERE p.active = 1
+    WHERE p.account_id = :account AND p.active
     ORDER BY p.category, p.name
-  `).all({ storeId });
+  `, { storeId, account: member.account_id });
 
   if (search) {
     const q = String(search).toLowerCase();
@@ -228,88 +407,107 @@ router.get('/inventory', (req, res) => {
 });
 
 /** Saves a counting session: writes count history and resets on-hand for each item. */
-router.post('/counts', (req, res) => {
+router.post('/counts', async (req, res) => {
+  const member = requireMember(req, 'count');
   const { store_id, counted_at = null, note = '', lines = [] } = req.body || {};
-  if (!store_id) throw httpError(400, 'store_id is required');
+  const storeId = accounts.assertStoreAccess(member, store_id);
+
   const clean = lines.filter((l) => l.qty !== '' && l.qty != null && !Number.isNaN(Number(l.qty)));
   if (!clean.length) throw httpError(400, 'No counted quantities were submitted');
+  const when = stampFor(counted_at || new Date().toISOString());
 
-  const when = counted_at ? `${counted_at}`.replace('T', ' ').slice(0, 19) : new Date().toISOString().slice(0, 19).replace('T', ' ');
-  const stamp = when.length === 10 ? `${when} 12:00:00` : when;
+  await tx(async (t) => {
+    for (const line of clean) {
+      await t.run(`
+        INSERT INTO counts (account_id, store_id, product_id, qty, counted_at, counted_by, note)
+        VALUES (:account, :store, :product, :qty, :at, :by, :note)
+      `, { account: member.account_id, store: storeId, product: line.product_id, qty: Number(line.qty), at: when, by: member.id, note });
 
-  const insertCount = db.prepare('INSERT INTO counts (store_id, product_id, qty, counted_at, note) VALUES (?, ?, ?, ?, ?)');
-  const setStock = db.prepare(`
-    INSERT INTO store_products (store_id, product_id, on_hand, updated_at)
-    VALUES (?, ?, ?, datetime('now'))
-    ON CONFLICT (store_id, product_id) DO UPDATE SET on_hand = excluded.on_hand, updated_at = datetime('now')
-  `);
-
-  db.transaction(() => {
-    for (const l of clean) {
-      insertCount.run(store_id, l.product_id, Number(l.qty), stamp, note);
-      setStock.run(store_id, l.product_id, Number(l.qty));
+      await t.run(`
+        INSERT INTO store_products (account_id, store_id, product_id, on_hand, updated_at)
+        VALUES (:account, :store, :product, :qty, now())
+        ON CONFLICT (store_id, product_id) DO UPDATE SET on_hand = excluded.on_hand, updated_at = now()
+      `, { account: member.account_id, store: storeId, product: line.product_id, qty: Number(line.qty) });
     }
-  })();
+  });
 
-  res.status(201).json({ saved: clean.length, counted_at: stamp });
+  res.status(201).json({ saved: clean.length, counted_at: when });
 });
 
-router.get('/counts', (req, res) => {
-  const { store_id = '', product_id = '', limit = 200 } = req.query;
-  let sql = `
-    SELECT c.*, p.name AS product_name, s.name AS store_name
-    FROM counts c JOIN products p ON p.id = c.product_id JOIN stores s ON s.id = c.store_id WHERE 1=1
-  `;
-  const params = {};
-  if (store_id) { sql += ' AND c.store_id = @store_id'; params.store_id = Number(store_id); }
-  if (product_id) { sql += ' AND c.product_id = @product_id'; params.product_id = Number(product_id); }
-  sql += ' ORDER BY c.counted_at DESC, c.id DESC LIMIT @limit';
-  params.limit = Number(limit);
-  res.json(db.prepare(sql).all(params));
+router.get('/counts', async (req, res) => {
+  const member = requireMember(req, 'view');
+  const storeIds = scopeStores(member, req.query.store_id);
+  res.json(await db.all(`
+    SELECT c.*, p.name AS product_name, s.name AS store_name,
+           (SELECT email FROM members WHERE id = c.counted_by) AS counted_by_email
+    FROM counts c
+    JOIN products p ON p.id = c.product_id
+    JOIN stores s   ON s.id = c.store_id
+    WHERE c.account_id = :account AND c.store_id = ANY(:ids)
+      AND (:productId::bigint IS NULL OR c.product_id = :productId)
+    ORDER BY c.counted_at DESC, c.id DESC LIMIT :limit
+  `, {
+    account: member.account_id,
+    ids: storeIds.length ? storeIds : [0],
+    productId: req.query.product_id ? Number(req.query.product_id) : null,
+    limit: Number(req.query.limit) || 200,
+  }));
 });
 
 /** Stock arriving outside an order: a walk-in buy, a transfer, a credit. */
-router.post('/receipts', (req, res) => {
+router.post('/receipts', async (req, res) => {
+  const member = requireMember(req, 'count');
   const { store_id, product_id, qty, received_at = null, note = '' } = req.body || {};
-  if (!store_id || !product_id || qty == null) throw httpError(400, 'store_id, product_id and qty are required');
-  const when = received_at ? `${received_at}`.replace('T', ' ').slice(0, 19) : new Date().toISOString().slice(0, 19).replace('T', ' ');
-  const stamp = when.length === 10 ? `${when} 12:00:00` : when;
-  db.transaction(() => {
-    db.prepare('INSERT INTO receipts (store_id, product_id, qty, received_at, note) VALUES (?, ?, ?, ?, ?)')
-      .run(store_id, product_id, Number(qty), stamp, note);
-    db.prepare(`
-      INSERT INTO store_products (store_id, product_id, on_hand, updated_at) VALUES (?, ?, ?, datetime('now'))
-      ON CONFLICT (store_id, product_id) DO UPDATE SET on_hand = ROUND(on_hand + excluded.on_hand, 4), updated_at = datetime('now')
-    `).run(store_id, product_id, Number(qty));
-  })();
+  const storeId = accounts.assertStoreAccess(member, store_id);
+  if (!product_id || qty == null) throw httpError(400, 'product_id and qty are required');
+  const when = stampFor(received_at || new Date().toISOString());
+
+  await tx(async (t) => {
+    await t.run(`
+      INSERT INTO receipts (account_id, store_id, product_id, qty, received_at, note)
+      VALUES (:account, :store, :product, :qty, :at, :note)
+    `, { account: member.account_id, store: storeId, product: product_id, qty: Number(qty), at: when, note });
+
+    await t.run(`
+      INSERT INTO store_products (account_id, store_id, product_id, on_hand, updated_at)
+      VALUES (:account, :store, :product, :qty, now())
+      ON CONFLICT (store_id, product_id) DO UPDATE
+        SET on_hand = round(store_products.on_hand + excluded.on_hand, 4), updated_at = now()
+    `, { account: member.account_id, store: storeId, product: product_id, qty: Number(qty) });
+  });
+
   res.status(201).json({ ok: true });
 });
 
 /* ------------------------------------------------------------------- usage */
 
-router.get('/usage', (req, res) => {
-  const { from, to, store_id = '', product_id = '', group_by = 'total', category = '' } = req.query;
+async function usageFor(req) {
+  const member = requireMember(req, 'view');
+  const { from, to, product_id = '', group_by = 'total', category = '' } = req.query;
   if (!from || !to) throw httpError(400, 'from and to dates are required');
-  res.json(usageReport({
-    from, to,
-    storeId: store_id || null,
+  const storeIds = scopeStores(member, req.query.store_id);
+
+  return usageReport({
+    accountId: member.account_id,
+    from,
+    to,
+    storeIds,
     productId: product_id || null,
     groupBy: group_by,
     category: category || null,
-  }));
-});
+  });
+}
 
-router.get('/usage/export.csv', (req, res) => {
-  const { from, to, store_id = '', group_by = 'total', category = '' } = req.query;
-  if (!from || !to) throw httpError(400, 'from and to dates are required');
-  const report = usageReport({ from, to, storeId: store_id || null, groupBy: group_by, category: category || null });
+router.get('/usage', async (req, res) => res.json(await usageFor(req)));
 
+router.get('/usage/export.csv', async (req, res) => {
+  const report = await usageFor(req);
   const columns = [
-    { key: 'store_name', label: 'Store' },
+    { key: 'store_name', label: 'Location' },
     { key: 'product_name', label: 'Product' },
     { key: 'category', label: 'Category' },
     { key: 'base_unit', label: 'Unit' },
-    { key: 'used', label: `Used ${from} to ${to}` },
+    { key: 'used', label: `Used ${report.from} to ${report.to}` },
     { key: 'per_week', label: 'Avg per week' },
     { key: 'per_month', label: 'Avg per month' },
     { key: 'est_cost', label: 'Est. cost' },
@@ -320,22 +518,31 @@ router.get('/usage/export.csv', (req, res) => {
     for (const b of report.buckets) flat[`bucket_${b}`] = r.buckets[b] ?? 0;
     return flat;
   });
-  sendCsv(res, `usage-${from}_to_${to}.csv`, toCsv(columns, rows));
+  sendCsv(res, `usage-${report.from}_to_${report.to}.csv`, toCsv(columns, rows));
 });
 
-router.get('/usage/segments', (req, res) => {
-  const { from, to, store_id = '', product_id = '' } = req.query;
+router.get('/usage/segments', async (req, res) => {
+  const member = requireMember(req, 'view');
+  const { from, to, product_id = '' } = req.query;
   if (!from || !to) throw httpError(400, 'from and to dates are required');
-  res.json(usageSegments({ from, to, storeId: store_id || null, productId: product_id || null }));
+  res.json(await usageSegments({
+    accountId: member.account_id,
+    from,
+    to,
+    storeIds: scopeStores(member, req.query.store_id),
+    productId: product_id || null,
+  }));
 });
 
 /* ------------------------------------------------------------------ orders */
 
-router.post('/orders/suggest', (req, res) => {
+router.post('/orders/suggest', async (req, res) => {
+  const member = requireMember(req, 'manage_orders');
   const { store_id, supplier_id, mode = 'both', days_of_cover = 7, lookback_days = 28, only_needed = true } = req.body || {};
-  if (!store_id || !supplier_id) throw httpError(400, 'store_id and supplier_id are required');
-  res.json(suggestOrder({
-    storeId: Number(store_id),
+  if (!supplier_id) throw httpError(400, 'supplier_id is required');
+  res.json(await suggestOrder({
+    accountId: member.account_id,
+    storeId: accounts.assertStoreAccess(member, store_id),
     supplierId: Number(supplier_id),
     mode,
     daysOfCover: Number(days_of_cover) || 7,
@@ -345,265 +552,321 @@ router.post('/orders/suggest', (req, res) => {
 });
 
 /** A supplier's order sheet as CSV without saving an order first. */
-router.get('/orders/sheet.csv', (req, res) => {
+router.get('/orders/sheet.csv', async (req, res) => {
+  const member = requireMember(req, 'manage_orders');
   const { store_id, supplier_id, mode = 'both', days_of_cover = 7, lookback_days = 28 } = req.query;
-  if (!store_id || !supplier_id) throw httpError(400, 'store_id and supplier_id are required');
-  const sheet = suggestOrder({
-    storeId: Number(store_id),
+  if (!supplier_id) throw httpError(400, 'supplier_id is required');
+
+  const sheet = await suggestOrder({
+    accountId: member.account_id,
+    storeId: accounts.assertStoreAccess(member, store_id),
     supplierId: Number(supplier_id),
     mode,
     daysOfCover: Number(days_of_cover) || 7,
     lookbackDays: Number(lookback_days) || 28,
     onlyNeeded: true,
   });
-  const name = `order-sheet-${slug(sheet.supplier.name)}-${slug(sheet.store.code)}.csv`;
-  sendCsv(res, name, suggestionToCsv(sheet));
+  sendCsv(res, `order-sheet-${slug(sheet.supplier.name)}-${slug(sheet.store.code)}.csv`, suggestionToCsv(sheet));
 });
 
-router.get('/orders', (req, res) => {
-  const { status = '', store_id = '' } = req.query;
-  let sql = `
+router.get('/orders', async (req, res) => {
+  const member = requireMember(req, 'view');
+  const storeIds = scopeStores(member, req.query.store_id);
+  res.json(await db.all(`
     SELECT o.*, s.name AS store_name, v.name AS supplier_name,
-           (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id) AS line_count,
-           (SELECT ROUND(SUM(oi.qty_packs * oi.unit_cost), 2) FROM order_items oi WHERE oi.order_id = o.id) AS total
-    FROM orders o JOIN stores s ON s.id = o.store_id JOIN suppliers v ON v.id = o.supplier_id WHERE 1=1
-  `;
-  const params = {};
-  if (status) { sql += ' AND o.status = @status'; params.status = status; }
-  if (store_id) { sql += ' AND o.store_id = @store_id'; params.store_id = Number(store_id); }
-  sql += ' ORDER BY o.created_at DESC, o.id DESC';
-  res.json(db.prepare(sql).all(params));
+           (SELECT count(*)::int FROM order_items oi WHERE oi.order_id = o.id) AS line_count,
+           (SELECT round(sum(oi.qty_packs * oi.unit_cost), 2) FROM order_items oi WHERE oi.order_id = o.id) AS total
+    FROM orders o JOIN stores s ON s.id = o.store_id JOIN suppliers v ON v.id = o.supplier_id
+    WHERE o.account_id = :account AND o.store_id = ANY(:ids)
+      AND (:status::text IS NULL OR o.status = :status)
+    ORDER BY o.created_at DESC, o.id DESC
+  `, {
+    account: member.account_id,
+    ids: storeIds.length ? storeIds : [0],
+    status: req.query.status || null,
+  }));
 });
 
-router.post('/orders', (req, res) => {
+router.post('/orders', async (req, res) => {
+  const member = requireMember(req, 'manage_orders');
   const { store_id, supplier_id, note = '', lines = [] } = req.body || {};
-  if (!store_id || !supplier_id) throw httpError(400, 'store_id and supplier_id are required');
-  res.status(201).json(createOrder({ storeId: Number(store_id), supplierId: Number(supplier_id), note, lines }));
+  if (!supplier_id) throw httpError(400, 'supplier_id is required');
+  res.status(201).json(await createOrder({
+    accountId: member.account_id,
+    storeId: accounts.assertStoreAccess(member, store_id),
+    supplierId: Number(supplier_id),
+    note,
+    lines,
+    createdBy: member.id,
+  }));
 });
 
-router.get('/orders/:id', (req, res) => {
-  const order = getOrder(Number(req.params.id));
+async function loadOrder(req, action = 'view') {
+  const member = requireMember(req, action);
+  const order = await getOrder(member.account_id, Number(req.params.id));
   if (!order) throw httpError(404, 'Order not found');
+  accounts.assertStoreAccess(member, order.store_id);
+  return { member, order };
+}
+
+router.get('/orders/:id', async (req, res) => {
+  const { order } = await loadOrder(req);
   res.json(order);
 });
 
-router.put('/orders/:id', (req, res) => {
-  const id = Number(req.params.id);
-  const order = getOrder(id);
-  if (!order) throw httpError(404, 'Order not found');
+router.put('/orders/:id', async (req, res) => {
+  const { member, order } = await loadOrder(req, 'manage_orders');
   const { note, lines } = req.body || {};
 
-  db.transaction(() => {
-    if (note !== undefined) db.prepare('UPDATE orders SET note = ? WHERE id = ?').run(note, id);
+  await tx(async (t) => {
+    if (note !== undefined) await t.run('UPDATE orders SET note = :note WHERE id = :id', { note, id: order.id });
     if (Array.isArray(lines)) {
-      db.prepare('DELETE FROM order_items WHERE order_id = ?').run(id);
-      const insert = db.prepare(`
-        INSERT INTO order_items (order_id, product_id, sku, pack_size, pack_unit, qty_packs, unit_cost)
-        VALUES (@order_id, @product_id, @sku, @pack_size, @pack_unit, @qty_packs, @unit_cost)
-      `);
-      for (const l of lines) {
-        if (!(Number(l.qty_packs) > 0)) continue;
-        insert.run({
-          order_id: id,
-          product_id: Number(l.product_id),
-          sku: l.sku || '',
-          pack_size: Number(l.pack_size) || 1,
-          pack_unit: l.pack_unit || 'case',
-          qty_packs: Number(l.qty_packs),
-          unit_cost: Number(l.unit_cost) || 0,
+      await t.run('DELETE FROM order_items WHERE order_id = :id', { id: order.id });
+      for (const line of lines) {
+        if (!(Number(line.qty_packs) > 0)) continue;
+        await t.run(`
+          INSERT INTO order_items (order_id, product_id, sku, pack_size, pack_unit, qty_packs, unit_cost)
+          VALUES (:order, :product, :sku, :packSize, :packUnit, :qty, :cost)
+        `, {
+          order: order.id, product: Number(line.product_id), sku: line.sku || '',
+          packSize: Number(line.pack_size) || 1, packUnit: line.pack_unit || 'case',
+          qty: Number(line.qty_packs), cost: Number(line.unit_cost) || 0,
         });
       }
     }
-  })();
-  res.json(getOrder(id));
+  });
+
+  res.json(await getOrder(member.account_id, order.id));
 });
 
-router.post('/orders/:id/status', (req, res) => {
+router.post('/orders/:id/status', async (req, res) => {
+  const { member, order } = await loadOrder(req, 'manage_orders');
   const { status } = req.body || {};
   if (!['draft', 'sent', 'received', 'cancelled'].includes(status)) throw httpError(400, 'Unknown status');
-  const id = Number(req.params.id);
-  if (status === 'received') return res.json(receiveOrder(id));
-  db.prepare("UPDATE orders SET status = ?, sent_at = CASE WHEN ? = 'sent' THEN datetime('now') ELSE sent_at END WHERE id = ?")
-    .run(status, status, id);
-  res.json(getOrder(id));
+  if (status === 'received') return res.json(await receiveOrder(member.account_id, order.id));
+
+  await db.run(`
+    UPDATE orders SET status = :status,
+      sent_at = CASE WHEN :status = 'sent' THEN now() ELSE sent_at END
+    WHERE id = :id
+  `, { status, id: order.id });
+  res.json(await getOrder(member.account_id, order.id));
 });
 
-router.post('/orders/:id/receive', (req, res) => {
+router.post('/orders/:id/receive', async (req, res) => {
+  const { member, order } = await loadOrder(req, 'manage_orders');
   const { received_at = null, lines = null } = req.body || {};
-  res.json(receiveOrder(Number(req.params.id), { receivedAt: received_at, lines }));
+  res.json(await receiveOrder(member.account_id, order.id, { receivedAt: received_at, lines }));
 });
 
-router.delete('/orders/:id', (req, res) => {
-  db.prepare('DELETE FROM orders WHERE id = ?').run(req.params.id);
+router.delete('/orders/:id', async (req, res) => {
+  const { member, order } = await loadOrder(req, 'manage_orders');
+  await db.run('DELETE FROM orders WHERE id = :id AND account_id = :account', { id: order.id, account: member.account_id });
   res.json({ ok: true });
 });
 
-router.get('/orders/:id/export.csv', (req, res) => {
-  const order = getOrder(Number(req.params.id));
-  if (!order) throw httpError(404, 'Order not found');
-  const name = `order-${order.id}-${slug(order.supplier_name)}-${slug(order.store_code)}.csv`;
-  sendCsv(res, name, orderToCsv(order));
+router.get('/orders/:id/export.csv', async (req, res) => {
+  const { order } = await loadOrder(req);
+  sendCsv(res, `order-${order.id}-${slug(order.supplier_name)}-${slug(order.store_code)}.csv`, orderToCsv(order));
 });
 
 /* --------------------------------------------------------------- schedules */
 
-router.get('/schedules', (req, res) => {
-  res.json(schedules.listSchedules({
+router.get('/schedules', async (req, res) => {
+  const member = requireMember(req, 'view');
+  res.json(await schedules.listSchedules({
+    accountId: member.account_id,
     activeOnly: req.query.active === '1',
-    storeId: req.query.store_id || null,
+    storeIds: scopeStores(member, req.query.store_id),
   }));
 });
 
-router.get('/schedules/upcoming', (req, res) => {
-  res.json(schedules.upcoming(Number(req.query.days) || 30));
+router.get('/schedules/upcoming', async (req, res) => {
+  const member = requireMember(req, 'view');
+  res.json(await schedules.upcoming(member.account_id, Number(req.query.days) || 30, { storeIds: member.store_ids }));
 });
 
 /** Raises drafts for every schedule that is due — the "catch me up" button. */
-router.post('/schedules/run-due', (req, res) => {
-  res.json({ runs: schedules.runDueSchedules() });
+router.post('/schedules/run-due', async (req, res) => {
+  const member = requireMember(req, 'manage_orders');
+  res.json({ runs: await schedules.runDueSchedules(member.account_id, { storeIds: member.store_ids, createdBy: member.id }) });
 });
 
-router.post('/schedules', (req, res) => {
-  res.status(201).json(schedules.saveSchedule(req.body || {}));
+router.post('/schedules', async (req, res) => {
+  const member = requireMember(req, 'manage_orders');
+  accounts.assertStoreAccess(member, (req.body || {}).store_id);
+  res.status(201).json(await schedules.saveSchedule(member.account_id, req.body || {}));
 });
 
-router.get('/schedules/:id', (req, res) => {
-  const schedule = schedules.getSchedule(Number(req.params.id));
+router.get('/schedules/:id', async (req, res) => {
+  const member = requireMember(req, 'view');
+  const schedule = await schedules.getSchedule(member.account_id, Number(req.params.id));
   if (!schedule) throw httpError(404, 'Schedule not found');
+  accounts.assertStoreAccess(member, schedule.store_id);
   res.json(schedule);
 });
 
-router.put('/schedules/:id', (req, res) => {
-  res.json(schedules.saveSchedule(req.body || {}, Number(req.params.id)));
+router.put('/schedules/:id', async (req, res) => {
+  const member = requireMember(req, 'manage_orders');
+  accounts.assertStoreAccess(member, (req.body || {}).store_id);
+  res.json(await schedules.saveSchedule(member.account_id, req.body || {}, Number(req.params.id)));
 });
 
-router.delete('/schedules/:id', (req, res) => {
-  db.prepare('DELETE FROM order_schedules WHERE id = ?').run(req.params.id);
+router.delete('/schedules/:id', async (req, res) => {
+  const member = requireMember(req, 'manage_orders');
+  await db.run('DELETE FROM order_schedules WHERE id = :id AND account_id = :account',
+    { id: req.params.id, account: member.account_id });
   res.json({ ok: true });
 });
 
-/** Build the draft this schedule is due for (force = run it early). */
-router.post('/schedules/:id/run', (req, res) => {
+/** Build the draft this schedule is due for (force = run it early, skip = pass on it). */
+router.post('/schedules/:id/run', async (req, res) => {
+  const member = requireMember(req, 'manage_orders');
+  const schedule = await schedules.getSchedule(member.account_id, Number(req.params.id));
+  if (!schedule) throw httpError(404, 'Schedule not found');
+  accounts.assertStoreAccess(member, schedule.store_id);
+
   const { force = false, skip = false } = req.body || {};
-  res.json(schedules.runSchedule(Number(req.params.id), { force, markOnly: skip }));
+  res.json(await schedules.runSchedule(member.account_id, schedule.id, { force, markOnly: skip, createdBy: member.id }));
 });
 
 /* --------------------------------------------------------- import / export */
 
-router.post('/import/products', (req, res) => {
+router.post('/import/products', async (req, res) => {
+  const member = requireMember(req, 'manage_catalog');
   const { csv, default_store_id = null } = req.body || {};
   if (!csv) throw httpError(400, 'No CSV content received');
-  res.json(importProducts(csv, { defaultStoreId: default_store_id ? Number(default_store_id) : null }));
+  res.json(await importProducts(member.account_id, csv, {
+    defaultStoreId: default_store_id ? accounts.assertStoreAccess(member, default_store_id) : null,
+    allowedStoreIds: member.store_ids,
+  }));
 });
 
-router.post('/import/counts', (req, res) => {
+router.post('/import/counts', async (req, res) => {
+  const member = requireMember(req, 'count');
   const { csv, default_store_id = null, counted_at = null } = req.body || {};
   if (!csv) throw httpError(400, 'No CSV content received');
-  res.json(importCounts(csv, { defaultStoreId: default_store_id ? Number(default_store_id) : null, countedAt: counted_at }));
+  res.json(await importCounts(member.account_id, csv, {
+    defaultStoreId: default_store_id ? accounts.assertStoreAccess(member, default_store_id) : null,
+    countedAt: counted_at,
+    allowedStoreIds: member.store_ids,
+    countedBy: member.id,
+  }));
 });
 
-router.get('/export/products.csv', (req, res) => {
-  sendCsv(res, 'products.csv', exportProductsCsv({ storeId: req.query.store_id || null }));
+router.get('/export/products.csv', async (req, res) => {
+  const member = requireMember(req, 'view');
+  sendCsv(res, 'products.csv', await exportProductsCsv(member.account_id, {
+    storeIds: scopeStores(member, req.query.store_id),
+  }));
 });
 
-router.get('/export/inventory.csv', (req, res) => {
-  const storeId = Number(req.query.store_id);
-  if (!storeId) throw httpError(400, 'store_id is required');
-  const store = db.prepare('SELECT * FROM stores WHERE id = ?').get(storeId);
-  const rows = db.prepare(`
+router.get('/export/inventory.csv', async (req, res) => {
+  const member = requireMember(req, 'view');
+  const storeId = accounts.assertStoreAccess(member, req.query.store_id);
+  const store = await db.one('SELECT * FROM stores WHERE id = :id', { id: storeId });
+
+  const rows = await db.all(`
     SELECT p.name AS product_name, p.category, p.base_unit,
            COALESCE(v.name, '') AS supplier_name, COALESCE(ps.sku, '') AS sku,
            COALESCE(sp.on_hand, 0) AS on_hand, COALESCE(sp.par_level, 0) AS par_level,
            COALESCE(sp.reorder_point, 0) AS reorder_point,
-           MAX(0, COALESCE(sp.par_level, 0) - COALESCE(sp.on_hand, 0)) AS needed,
-           (SELECT MAX(counted_at) FROM counts c WHERE c.store_id = @storeId AND c.product_id = p.id) AS last_counted
+           GREATEST(0, COALESCE(sp.par_level, 0) - COALESCE(sp.on_hand, 0)) AS needed,
+           (SELECT max(counted_at) FROM counts c WHERE c.store_id = :storeId AND c.product_id = p.id) AS last_counted
     FROM products p
-    LEFT JOIN store_products sp ON sp.product_id = p.id AND sp.store_id = @storeId
-    LEFT JOIN product_suppliers ps ON ps.product_id = p.id AND ps.is_primary = 1
+    LEFT JOIN store_products sp ON sp.product_id = p.id AND sp.store_id = :storeId
+    LEFT JOIN product_suppliers ps ON ps.product_id = p.id AND ps.is_primary
     LEFT JOIN suppliers v ON v.id = ps.supplier_id
-    WHERE p.active = 1 ORDER BY p.category, p.name
-  `).all({ storeId });
+    WHERE p.account_id = :account AND p.active
+    ORDER BY p.category, p.name
+  `, { storeId, account: member.account_id });
+
   const columns = ['product_name', 'category', 'base_unit', 'supplier_name', 'sku', 'on_hand', 'par_level', 'reorder_point', 'needed', 'last_counted'];
-  sendCsv(res, `inventory-${slug(store?.code || 'store')}.csv`, toCsv(columns, rows));
+  sendCsv(res, `inventory-${slug(store.code)}.csv`, toCsv(columns, rows));
 });
 
 /** A blank counting sheet to print or fill in on a tablet, then import back. */
-router.get('/export/count-sheet.csv', (req, res) => {
-  const storeId = Number(req.query.store_id);
-  if (!storeId) throw httpError(400, 'store_id is required');
-  const store = db.prepare('SELECT * FROM stores WHERE id = ?').get(storeId);
-  const rows = db.prepare(`
-    SELECT s.code AS store_code, p.name AS product_name, COALESCE(ps.sku, '') AS sku,
+router.get('/export/count-sheet.csv', async (req, res) => {
+  const member = requireMember(req, 'view');
+  const storeId = accounts.assertStoreAccess(member, req.query.store_id);
+  const store = await db.one('SELECT * FROM stores WHERE id = :id', { id: storeId });
+
+  const rows = await db.all(`
+    SELECT :code AS store_code, p.name AS product_name, COALESCE(ps.sku, '') AS sku,
            p.category, p.base_unit, '' AS qty, COALESCE(sp.on_hand, 0) AS last_on_hand
     FROM products p
-    CROSS JOIN stores s
-    LEFT JOIN store_products sp ON sp.product_id = p.id AND sp.store_id = s.id
-    LEFT JOIN product_suppliers ps ON ps.product_id = p.id AND ps.is_primary = 1
-    WHERE p.active = 1 AND s.id = @storeId ORDER BY p.category, p.name
-  `).all({ storeId });
+    LEFT JOIN store_products sp ON sp.product_id = p.id AND sp.store_id = :storeId
+    LEFT JOIN product_suppliers ps ON ps.product_id = p.id AND ps.is_primary
+    WHERE p.account_id = :account AND p.active
+    ORDER BY p.category, p.name
+  `, { storeId, account: member.account_id, code: store.code });
+
   const columns = ['store_code', 'product_name', 'sku', 'category', 'base_unit', 'qty', 'last_on_hand'];
-  sendCsv(res, `count-sheet-${slug(store?.code || 'store')}.csv`, toCsv(columns, rows));
+  sendCsv(res, `count-sheet-${slug(store.code)}.csv`, toCsv(columns, rows));
 });
 
 /* --------------------------------------------------------------- dashboard */
 
-router.get('/dashboard', (req, res) => {
-  const stores = db.prepare('SELECT * FROM stores WHERE active = 1 ORDER BY name').all();
-  const summary = stores.map((store) => {
-    const stats = db.prepare(`
-      SELECT COUNT(*) AS tracked,
-             SUM(CASE WHEN par_level > 0 AND on_hand < par_level THEN 1 ELSE 0 END) AS below_par,
-             SUM(CASE WHEN reorder_point > 0 AND on_hand <= reorder_point THEN 1 ELSE 0 END) AS below_reorder,
-             MAX(updated_at) AS last_update
-      FROM store_products WHERE store_id = ?
-    `).get(store.id);
-    const value = db.prepare(`
-      SELECT ROUND(SUM(sp.on_hand * (ps.unit_cost / NULLIF(ps.pack_size, 0))), 2) AS stock_value
-      FROM store_products sp JOIN product_suppliers ps ON ps.product_id = sp.product_id AND ps.is_primary = 1
-      WHERE sp.store_id = ?
-    `).get(store.id);
-    const lastCount = db.prepare('SELECT MAX(counted_at) AS at FROM counts WHERE store_id = ?').get(store.id);
-    return { ...store, ...stats, stock_value: value.stock_value || 0, last_count: lastCount.at };
-  });
+router.get('/dashboard', async (req, res) => {
+  const member = requireMember(req, 'view');
+  const ids = member.store_ids.length ? member.store_ids : [0];
 
-  const openOrders = db.prepare(`
+  const stores = await db.all('SELECT * FROM stores WHERE account_id = :account AND id = ANY(:ids) AND active ORDER BY name',
+    { account: member.account_id, ids });
+
+  const summary = [];
+  for (const store of stores) {
+    const stats = await db.one(`
+      SELECT count(*)::int AS tracked,
+             count(*) FILTER (WHERE par_level > 0 AND on_hand < par_level)::int AS below_par,
+             count(*) FILTER (WHERE reorder_point > 0 AND on_hand <= reorder_point)::int AS below_reorder,
+             max(updated_at) AS last_update
+      FROM store_products WHERE store_id = :store
+    `, { store: store.id });
+
+    const value = await db.value(`
+      SELECT round(sum(sp.on_hand * (ps.unit_cost / NULLIF(ps.pack_size, 0))), 2)
+      FROM store_products sp JOIN product_suppliers ps ON ps.product_id = sp.product_id AND ps.is_primary
+      WHERE sp.store_id = :store
+    `, { store: store.id });
+
+    const lastCount = await db.value('SELECT max(counted_at) FROM counts WHERE store_id = :store', { store: store.id });
+    summary.push({ ...store, ...stats, stock_value: value || 0, last_count: lastCount });
+  }
+
+  const openOrders = await db.all(`
     SELECT o.id, o.status, o.created_at, s.name AS store_name, v.name AS supplier_name,
-           (SELECT ROUND(SUM(oi.qty_packs * oi.unit_cost), 2) FROM order_items oi WHERE oi.order_id = o.id) AS total
+           (SELECT round(sum(oi.qty_packs * oi.unit_cost), 2) FROM order_items oi WHERE oi.order_id = o.id) AS total
     FROM orders o JOIN stores s ON s.id = o.store_id JOIN suppliers v ON v.id = o.supplier_id
-    WHERE o.status IN ('draft', 'sent') ORDER BY o.created_at DESC LIMIT 20
-  `).all();
+    WHERE o.account_id = :account AND o.store_id = ANY(:ids) AND o.status IN ('draft', 'sent')
+    ORDER BY o.created_at DESC LIMIT 20
+  `, { account: member.account_id, ids });
 
-  const counts = db.prepare(`
-    SELECT (SELECT COUNT(*) FROM products WHERE active = 1) AS products,
-           (SELECT COUNT(*) FROM suppliers WHERE active = 1) AS suppliers,
-           (SELECT COUNT(*) FROM product_suppliers) AS skus
-  `).get();
+  const counts = await db.one(`
+    SELECT (SELECT count(*)::int FROM products  WHERE account_id = :account AND active) AS products,
+           (SELECT count(*)::int FROM suppliers WHERE account_id = :account AND active) AS suppliers,
+           (SELECT count(*)::int FROM product_suppliers WHERE account_id = :account)    AS skus,
+           (SELECT count(*)::int FROM members   WHERE account_id = :account)            AS people
+  `, { account: member.account_id });
 
   const to = new Date().toISOString().slice(0, 10);
   const from = new Date(Date.now() - 27 * 86400000).toISOString().slice(0, 10);
-  const topUsage = usageReport({ from, to, groupBy: 'total' }).rows.slice(0, 10);
-
-  const upcomingOrders = schedules.upcoming(14);
-  const dueNow = upcomingOrders.filter((u) => u.is_due);
+  const usage = await usageReport({ accountId: member.account_id, from, to, storeIds: member.store_ids, groupBy: 'total' });
+  const upcomingOrders = await schedules.upcoming(member.account_id, 14, { storeIds: member.store_ids });
 
   res.json({
+    account: { id: member.account_id, name: member.account_name },
     stores: summary,
     open_orders: openOrders,
     counts,
-    top_usage: topUsage,
+    top_usage: usage.rows.slice(0, 10),
     usage_window: { from, to },
-    schedule_due: dueNow,
+    schedule_due: upcomingOrders.filter((u) => u.is_due),
     schedule_upcoming: upcomingOrders.filter((u) => !u.is_due).slice(0, 8),
   });
 });
 
 /* ----------------------------------------------------------------- helpers */
-
-function pick(obj, fields) {
-  const out = {};
-  for (const f of fields) if (obj && obj[f] !== undefined) out[f] = obj[f];
-  return out;
-}
 
 function slug(s) {
   return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'export';

@@ -1,6 +1,7 @@
 import { api, el, money, toast, modal, field, input, empty, confirmAction } from '../util.js';
 import { refreshReference, getState } from '../store.js';
 import { go } from '../router.js';
+import * as session from '../session.js';
 
 export async function suppliersView(root) {
   const body = el('div');
@@ -10,7 +11,7 @@ export async function suppliersView(root) {
         el('h1', { text: 'Suppliers' }),
         el('p.muted', { text: 'Who you order from, how to reach them, and the minimum they want on an order.' }),
       ]),
-      el('button.btn', { text: 'New supplier', onclick: () => supplierEditor(null, load) }),
+      session.can('manage_catalog') ? el('button.btn', { text: 'New supplier', onclick: () => supplierEditor(null, load) }) : null,
     ]),
     body,
   );
@@ -31,9 +32,9 @@ export async function suppliersView(root) {
       ].flat()),
       s.notes ? el('p.muted.small', { text: s.notes }) : null,
       el('div.row.gap', {}, [
-        el('button.btn.ghost.small', { text: 'Build order', onclick: () => go(`/orders/new?supplier_id=${s.id}`) }),
-        el('button.link', { text: 'Edit', onclick: () => supplierEditor(s, load) }),
-        el('button.link.danger', { text: 'Delete', onclick: async () => {
+        session.can('manage_orders') ? el('button.btn.ghost.small', { text: 'Build order', onclick: () => go(`/orders/new?supplier_id=${s.id}`) }) : null,
+        session.can('manage_catalog') ? el('button.link', { text: 'Edit', onclick: () => supplierEditor(s, load) }) : null,
+        !session.can('manage_catalog') ? null : el('button.link.danger', { text: 'Delete', onclick: async () => {
           if (!confirmAction(`Delete ${s.name}? Its SKU links and order history go too.`)) return;
           await api(`/suppliers/${s.id}`, { method: 'DELETE' });
           await refreshReference();
@@ -103,10 +104,10 @@ export async function storesView(root) {
   root.append(
     el('div.page-head', {}, [
       el('div', {}, [
-        el('h1', { text: 'Stores' }),
-        el('p.muted', { text: 'Two stores are set up for you. Rename them to match your locations; the short code is what CSV files use.' }),
+        el('h1', { text: 'Locations' }),
+        el('p.muted', { text: 'Every location on this account. The short code is what CSV files use, and what the picker at the top shows.' }),
       ]),
-      el('button.btn', { text: 'Add store', onclick: () => storeEditor(null, load) }),
+      el('button.btn', { text: 'Add location', onclick: () => storeEditor(null, load) }),
     ]),
     body,
   );
@@ -122,7 +123,7 @@ export async function storesView(root) {
         stores.length > 1 ? el('button.link.danger', { text: 'Delete', onclick: async () => {
           if (!confirmAction(`Delete ${s.name}? All of its stock, counts and orders go too.`)) return;
           await api(`/stores/${s.id}`, { method: 'DELETE' });
-          toast('Store deleted');
+          toast('Location deleted');
           load();
         } }) : null,
       ]),
@@ -144,16 +145,16 @@ function storeEditor(store, onSaved) {
       if (isNew) await api('/stores', { method: 'POST', body: payload });
       else await api(`/stores/${store.id}`, { method: 'PUT', body: payload });
       await refreshReference();
-      toast('Store saved');
+      toast('Location saved');
       close();
       onSaved?.();
     } catch (err) { toast(err.message, 'bad'); }
   } }, [
-    field('Store name', name),
+    field('Location name', name),
     field('Short code', code, 'Used in CSV imports and exports'),
     field('Address', address),
-    el('div.modal-foot', {}, [el('button.btn', { type: 'submit', text: isNew ? 'Add store' : 'Save changes' })]),
+    el('div.modal-foot', {}, [el('button.btn', { type: 'submit', text: isNew ? 'Add location' : 'Save changes' })]),
   ]);
 
-  const { close } = modal(isNew ? 'Add store' : store.name, form);
+  const { close } = modal(isNew ? 'Add location' : store.name, form);
 }

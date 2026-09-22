@@ -1,6 +1,7 @@
 import { api, el, qty, money, toast, modal, field, input, select, empty, download, confirmAction } from '../util.js';
 import { getState, refreshReference, supplierOptions, categoryOptions } from '../store.js';
 import { go } from '../router.js';
+import * as session from '../session.js';
 
 const filters = { search: '', supplier_id: '', category: '' };
 
@@ -15,8 +16,8 @@ export async function productsView(root) {
       ]),
       el('div.row.gap', {}, [
         el('button.btn.ghost', { text: 'Export CSV', onclick: () => download('/export/products.csv') }),
-        el('button.btn.ghost', { text: 'Import CSV', onclick: () => go('/data') }),
-        el('button.btn', { text: 'New product', onclick: () => productEditor(null, load) }),
+        session.can('manage_catalog') ? el('button.btn.ghost', { text: 'Import CSV', onclick: () => go('/data') }) : null,
+        session.can('manage_catalog') ? el('button.btn', { text: 'New product', onclick: () => productEditor(null, load) }) : null,
       ]),
     ]),
     el('div.filter-bar', {}, [
@@ -66,7 +67,7 @@ function render(body, products, reload) {
           el('span', { text: row ? `${qty(row.on_hand)} on hand / par ${qty(row.par_level)}` : 'not tracked' }),
         ]);
       })),
-      el('td.right', {}, [
+      el('td.right', {}, !session.can('manage_catalog') ? [] : [
         el('button.link', { text: 'Edit', onclick: () => productEditor(p, reload) }),
         el('button.link.danger', { text: 'Delete', onclick: async () => {
           if (!confirmAction(`Delete "${p.name}"? Counts and order history for it go too.`)) return;

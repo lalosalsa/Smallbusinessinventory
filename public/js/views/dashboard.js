@@ -79,7 +79,7 @@ export async function dashboardView(root) {
       el('section.card', {}, [
         el('div.card-head', {}, [el('h3', { text: 'Open orders' }), el('button.link', { text: 'All orders', onclick: () => go('/orders') })]),
         orderRows.length
-          ? table(['Order', 'Supplier', 'Store', 'Status', 'Total', 'Raised'], orderRows, { className: 'clickable' })
+          ? table(['Order', 'Supplier', 'Location', 'Status', 'Total', 'Raised'], orderRows, { className: 'clickable' })
           : empty('Nothing open. Build an order from the Orders tab.'),
       ]),
       el('section.card', {}, [
@@ -96,7 +96,7 @@ export async function dashboardView(root) {
           el('button.link', { text: 'Usage report', onclick: () => go('/usage') }),
         ]),
         usageRows.length
-          ? table(['Product', 'Store', 'Used', 'Per week', 'Est. cost'], usageRows)
+          ? table(['Product', 'Location', 'Used', 'Per week', 'Est. cost'], usageRows)
           : empty('Usage appears once you have two counts for a product.'),
       ]),
     ]),

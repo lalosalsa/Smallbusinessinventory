@@ -4,7 +4,7 @@ import * as session from '../session.js';
 
 export async function dataView(root) {
   const { stores } = getState();
-  const storeChoices = [{ value: '', label: 'Use the store column in the file' }, ...stores.map((s) => ({ value: s.id, label: s.name }))];
+  const storeChoices = [{ value: '', label: 'Use the location column in the file' }, ...stores.map((s) => ({ value: s.id, label: s.name }))];
 
   root.append(
     el('div.page-head', {}, [
@@ -19,7 +19,7 @@ export async function dataView(root) {
         blurb: 'One row per product per supplier. Re-importing the same file updates what is already there instead of duplicating it.',
         endpoint: '/import/products',
         storeChoices,
-        storeHint: 'Store for par/on-hand columns',
+        storeHint: 'Location for par/on-hand columns',
         columns: [
           ['product_name', 'required — the name you count by'],
           ['category', 'e.g. Dairy, Dry goods, Packaging'],
@@ -29,10 +29,10 @@ export async function dataView(root) {
           ['pack_size', 'base units per case, e.g. 24'],
           ['pack_unit', 'case, box, bag…'],
           ['unit_cost', 'price per case/pack'],
-          ['store_code', 'S1, S2… (or the store name)'],
-          ['par_level', 'target stock for that store'],
+          ['store_code', 'the location code, e.g. S1 (or its full name)'],
+          ['par_level', 'target stock at that location'],
           ['reorder_point', 'flag the item at or below this'],
-          ['on_hand', 'current stock for that store'],
+          ['on_hand', 'current stock at that location'],
         ],
         sample: 'products-sample.csv',
       }) : null,
@@ -41,10 +41,10 @@ export async function dataView(root) {
         blurb: 'Bring counts in from a printed or tablet sheet. Rows match on SKU first, then product name.',
         endpoint: '/import/counts',
         storeChoices,
-        storeHint: 'Store these counts belong to',
+        storeHint: 'Location these counts belong to',
         withDate: true,
         columns: [
-          ['store_code', 'S1, S2… (optional if you pick a store)'],
+          ['store_code', 'optional if you pick a location above'],
           ['sku', 'supplier SKU — matched first'],
           ['product_name', 'used when there is no SKU'],
           ['qty', 'required — what you counted'],

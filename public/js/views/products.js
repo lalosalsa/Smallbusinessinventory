@@ -83,7 +83,7 @@ function render(body, products, reload) {
     el('table.data', {}, [
       el('thead', {}, [el('tr', {}, [
         el('th', { text: 'Product' }), el('th', { text: 'Suppliers & SKUs' }),
-        el('th', { text: 'Per store' }), el('th.right', { text: '' }),
+        el('th', { text: 'Per location' }), el('th.right', { text: '' }),
       ])]),
       el('tbody', {}, rows),
     ]),
@@ -127,7 +127,7 @@ export function productEditor(product, onSaved) {
     el('h3.section-title', { text: 'Suppliers & SKUs' }),
     linkRows,
     el('button.btn.ghost.small', { type: 'button', text: '+ Add supplier', onclick: () => addLink() }),
-    el('h3.section-title', { text: 'Par levels per store' }),
+    el('h3.section-title', { text: 'Par levels per location' }),
     stockRows,
     el('div.modal-foot', {}, [
       el('button.btn', { type: 'submit', text: isNew ? 'Create product' : 'Save changes' }),

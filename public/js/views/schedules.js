@@ -58,7 +58,7 @@ export async function schedulesView(root) {
     body.append(el('div.card.flush', {}, [
       el('table.data', {}, [
         el('thead', {}, [el('tr', {}, [
-          el('th', { text: 'Supplier' }), el('th', { text: 'Store' }), el('th', { text: 'Repeats' }),
+          el('th', { text: 'Supplier' }), el('th', { text: 'Location' }), el('th', { text: 'Repeats' }),
           el('th', { text: 'Next order day' }), el('th', { text: 'Expected delivery' }),
           el('th', { text: 'Last raised' }), el('th.right', { text: '' }),
         ])]),
@@ -202,7 +202,7 @@ export function scheduleEditor(schedule, onSaved) {
   const form = el('form.modal-body', { onsubmit: submit }, [
     el('div.grid.two', {}, [
       field('Supplier', supplierSelect),
-      field('Store', storeSelect),
+      field('Location', storeSelect),
       field('Label (optional)', nameInput),
       field('Repeats', frequencySelect),
       weekRow,

@@ -43,7 +43,7 @@ export async function ordersView(root) {
       el('td.muted', { text: relative(o.created_at) }),
     ]));
     body.append(el('div.card.flush', {}, [
-      table(['Order', 'Supplier', 'Store', 'Status', 'Lines', 'Total', 'Raised'], rows, { className: 'clickable' }),
+      table(['Order', 'Supplier', 'Location', 'Status', 'Lines', 'Total', 'Raised'], rows, { className: 'clickable' }),
     ]));
   }
   await load();
@@ -69,7 +69,7 @@ export async function newOrderView(root, params) {
 
   const controls = el('div.card.controls', {}, [
     el('div.control-grid', {}, [
-      labelled('Store', select(stores.map((s) => ({ value: s.id, label: s.name })), {
+      labelled('Location', select(stores.map((s) => ({ value: s.id, label: s.name })), {
         value: settings.store_id,
         onchange: (e) => { settings.store_id = Number(e.target.value); setActiveStore(settings.store_id); build(); },
       })),

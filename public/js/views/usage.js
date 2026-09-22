@@ -55,7 +55,7 @@ export async function usageView(root) {
     el('div.filter-bar', {}, [
       el('label.inline', {}, [el('span.muted.small', { text: 'From' }), fromInput]),
       el('label.inline', {}, [el('span.muted.small', { text: 'To' }), toInput]),
-      select([{ value: '', label: 'Both stores' }, ...stores.map((s) => ({ value: s.id, label: s.name }))],
+      select([{ value: '', label: 'All locations' }, ...stores.map((s) => ({ value: s.id, label: s.name }))],
         { value: period.store_id, onchange: (e) => { period.store_id = e.target.value; load(); } }),
       select(categoryOptions(), { value: period.category, onchange: (e) => { period.category = e.target.value; load(); } }),
       select([

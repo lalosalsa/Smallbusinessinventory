@@ -13,7 +13,7 @@ export async function inventoryView(root) {
   const head = el('div.page-head', {}, [
     el('div', {}, [
       el('h1', { text: `Stock — ${store.name}` }),
-      el('p.muted', { text: 'Type what you count. Saving writes a dated count and updates on-hand for this store.' }),
+      el('p.muted', { text: 'Type what you count. Saving writes a dated count and updates on-hand for this location.' }),
     ]),
     el('div.row.gap', {}, [
       el('button.btn.ghost', { text: 'Export stock CSV', onclick: () => download(`/export/inventory.csv?store_id=${store.id}`) }),

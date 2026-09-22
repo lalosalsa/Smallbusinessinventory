@@ -8,7 +8,8 @@
   "scripts": {
     "start": "node server.js",
     "seed": "node scripts/seed.js",
-    "test": "node --test --test-concurrency=1 test/*.test.js"
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "check-db": "node scripts/check-db.js"
   },
   "engines": {
     "node": ">=18"

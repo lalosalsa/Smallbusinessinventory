@@ -4,6 +4,7 @@ const path = require('path');
 const express = require('express');
 const api = require('./src/api');
 const { migrate, ping, CONNECTION } = require('./src/db');
+const { explainConnectionError } = require('./src/db-errors');
 const { authMode } = require('./src/auth');
 
 const app = express();
@@ -50,7 +51,8 @@ async function start() {
 if (require.main === module) {
   require('./src/env').load();
   start().catch((err) => {
-    console.error('Could not start:', err.message);
+    console.error('Could not start.\n');
+    console.error(explainConnectionError(err));
     process.exit(1);
   });
 }

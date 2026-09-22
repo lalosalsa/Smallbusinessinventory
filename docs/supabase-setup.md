@@ -15,6 +15,13 @@ postgresql://postgres.abcdefghijklm:[YOUR-PASSWORD]@aws-0-us-east-1.pooler.supab
 Swap `[YOUR-PASSWORD]` for your database password (the one you set when you created the
 project; you can reset it on the same page).
 
+Two things that catch people out:
+
+- `https://<project>.supabase.co` is the **API** address, not the database one. Putting it
+  in `DATABASE_URL` will not connect.
+- If your password contains `@ : / ? # %`, percent-encode it inside the connection string
+  (`@` becomes `%40`, `#` becomes `%23`). Other punctuation, `!` included, is fine as-is.
+
 ## 2. Write your .env
 
 ```bash
@@ -35,8 +42,13 @@ they are in.
 
 ```bash
 npm install
+npm run check-db
 npm start
 ```
+
+`npm run check-db` connects, reports what it finds, and names the fix when it cannot
+connect — a wrong password, the API address used in place of the database one, or the
+IPv6-only direct connection on an IPv4 network.
 
 The app applies `sql/schema.sql` on boot, so the tables appear by themselves, and it is
 safe to re-run as the app is updated. If you would rather run it by hand, paste

@@ -41,6 +41,9 @@ const pool = new Pool({
   ssl: sslSetting(CONNECTION),
   max: Number(process.env.PG_POOL_MAX) || 10,
   idleTimeoutMillis: 30_000,
+  // Without this, a firewalled or mistyped host leaves the app hanging rather than
+  // saying what is wrong.
+  connectionTimeoutMillis: Number(process.env.PG_CONNECT_TIMEOUT) || 15_000,
 });
 
 pool.on('error', (err) => console.error('Postgres pool error:', err.message));

@@ -42,6 +42,7 @@ out of the box.
 ```bash
 npm install
 cp .env.example .env     # put your Supabase connection string in it
+npm run check-db         # confirms it can reach the database, and says why if not
 npm start                # http://localhost:3000
 ```
 
@@ -59,7 +60,7 @@ npm run seed             # a demo account with 8 weeks of counts, orders and sch
 dashboard. Only `DATABASE_URL` is needed — sign-in works out of the box.
 
 ```bash
-npm test                 # 67 tests, run against a real Postgres
+npm test                 # 96 tests, run against a real Postgres
 npm run seed -- --reset  # wipe every account and reload the demo data
 PORT=8080 npm start      # serve on another port
 ```
@@ -273,6 +274,7 @@ what you edit is what runs.
 | `PORT`, `HOST` | Where to listen (default `3000`, `0.0.0.0`) |
 | `SKIP_MIGRATE=1` | Do not apply `sql/schema.sql` at boot |
 | `PGSSL=disable` | For a plain local Postgres |
+| `PG_CONNECT_TIMEOUT` | How long to wait for the database before giving up (default 15000ms) |
 | `AUTH_SECRET` | Signs local-mode tokens; generated and saved if unset |
 
 ### Tests

@@ -1,0 +1,13 @@
+product_name,category,base_unit,supplier_name,sku,pack_size,pack_unit,unit_cost,store_code,par_level,reorder_point,on_hand
+Whole Milk 1 gal,Dairy,gal,Sysco,SY-10432,4,case,14.80,S1,12,4,9
+Whole Milk 1 gal,Dairy,gal,Sysco,SY-10432,4,case,14.80,S2,8,3,6
+Heavy Cream 1 qt,Dairy,qt,Sysco,SY-10877,12,case,38.40,S1,10,3,5
+Unsalted Butter 1 lb,Dairy,lb,Sysco,SY-11290,36,case,112.50,S1,20,6,14
+All Purpose Flour 50 lb,Dry Goods,bag,Restaurant Depot,RD-2201,1,bag,21.95,S1,6,2,3
+Granulated Sugar 25 lb,Dry Goods,bag,Restaurant Depot,RD-2245,1,bag,18.40,S1,4,2,2
+Espresso Beans 5 lb,Coffee,lb,Bay Coffee Roasters,BCR-ESP5,5,bag,72.00,S1,25,10,18
+Espresso Beans 5 lb,Coffee,lb,Bay Coffee Roasters,BCR-ESP5,5,bag,72.00,S2,20,8,11
+Oat Milk 32 oz,Dairy Alt,carton,Bay Coffee Roasters,BCR-OAT32,12,case,42.00,S1,24,8,15
+12 oz Hot Cup,Packaging,each,Pacific Paper,PP-HC12,1000,case,68.00,S1,2000,500,1400
+12 oz Cup Lid,Packaging,each,Pacific Paper,PP-LID12,1000,case,41.00,S1,2000,500,900
+Napkins,Packaging,each,Pacific Paper,PP-NAP,6000,case,52.00,S2,6000,2000,4500

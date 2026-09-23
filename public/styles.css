@@ -331,3 +331,8 @@ ul.tight { margin: .2rem 0; padding-left: 1.1rem; font-size: .85rem; }
 }
 .spent-codes { margin-top: .6rem; }
 .spent-codes summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
+
+.startup-error {
+  white-space: pre-wrap; font-size: .9rem; line-height: 1.5;
+  background: var(--bad-soft); color: var(--bad); border-radius: 8px; padding: .7rem .9rem; margin: .6rem 0;
+}

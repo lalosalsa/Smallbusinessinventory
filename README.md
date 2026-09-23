@@ -318,3 +318,9 @@ except the sign-in ones. Everything is scoped to the signed-in person's account.
 | POST | `/schedules/:id/run`, `/schedules/run-due` | Build drafts that are due |
 | POST | `/import/products`, `/import/counts` | CSV import |
 | GET | `/export/products.csv`, `/export/inventory.csv`, `/export/count-sheet.csv` | CSV export |
+
+### Putting it online
+
+`docs/deploy.md` covers Vercel (serverless, config included) and Render or any plain Node
+host. Either way you set two environment variables, `DATABASE_URL` and `AUTH_SECRET`, and
+deploy from the repository.

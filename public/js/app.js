@@ -2,7 +2,7 @@ import { el, toast, clear } from './util.js';
 import { route, render, setOutlet, go } from './router.js';
 import { refreshReference, getState, setActiveStore, onChange } from './store.js';
 import * as session from './session.js';
-import { authScreen, accountSetupScreen } from './views/auth.js';
+import { authScreen, accountSetupScreen, startupErrorScreen } from './views/auth.js';
 import { dashboardView } from './views/dashboard.js';
 import { inventoryView } from './views/inventory.js';
 import { productsView } from './views/products.js';
@@ -91,7 +91,13 @@ async function boot() {
   setOutlet(document.getElementById('outlet'));
   const gate = document.getElementById('gate');
 
-  await session.boot();
+  try {
+    await session.boot();
+  } catch (err) {
+    showShell(false);
+    clear(gate).append(startupErrorScreen(err.message, boot));
+    return;
+  }
 
   if (!session.signedIn()) {
     showShell(false);

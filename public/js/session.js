@@ -64,7 +64,11 @@ export async function boot() {
 /** The sign-in config tells the browser which mode the server is in. */
 async function loadConfig() {
   const res = await request('/api/auth/config');
-  return readJson(res, '/api/auth/config');
+  const data = await readJson(res, '/api/auth/config');
+  // The server answers 503 with a sentence when it is missing a setting or cannot reach
+  // its database; that sentence is the thing to show, not a sign-in form.
+  if (!res.ok) throw new Error(data?.error || `The server is not ready (${res.status})`);
+  return data;
 }
 
 /** Re-reads who we are: used after signing in, creating an account or changing people. */

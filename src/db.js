@@ -36,11 +36,15 @@ function sslSetting(connection) {
   return { rejectUnauthorized: process.env.PGSSL_NO_VERIFY === '1' ? false : true };
 }
 
+// On a serverless host each instance keeps its own pool, and many instances may be
+// alive at once, so each one is kept small and lets go of idle connections sooner.
+const SERVERLESS = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NETLIFY);
+
 const pool = new Pool({
   connectionString: CONNECTION,
   ssl: sslSetting(CONNECTION),
-  max: Number(process.env.PG_POOL_MAX) || 10,
-  idleTimeoutMillis: 30_000,
+  max: Number(process.env.PG_POOL_MAX) || (SERVERLESS ? 3 : 10),
+  idleTimeoutMillis: SERVERLESS ? 10_000 : 30_000,
   // Without this, a firewalled or mistyped host leaves the app hanging rather than
   // saying what is wrong.
   connectionTimeoutMillis: Number(process.env.PG_CONNECT_TIMEOUT) || 15_000,
@@ -105,10 +109,27 @@ async function tx(fn) {
   }
 }
 
-/** Applies sql/schema.sql. It is idempotent, so it is safe on every boot. */
+/**
+ * Applies sql/schema.sql. It is idempotent, so it is safe on every boot, and it runs
+ * under an advisory lock so two instances booting at the same moment take turns
+ * instead of tripping over each other's CREATE statements.
+ */
+const MIGRATE_LOCK = 727_491;
+
 async function migrate() {
   const schema = fs.readFileSync(path.join(__dirname, '..', 'sql', 'schema.sql'), 'utf8');
-  await pool.query(schema);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1)', [MIGRATE_LOCK]);
+    await client.query(schema);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 async function ping() {
@@ -118,4 +139,4 @@ async function ping() {
 
 async function close() { await pool.end(); }
 
-module.exports = { db, tx, bind, sql, pool, migrate, ping, close, CONNECTION };
+module.exports = { db, tx, bind, sql, pool, migrate, ping, close, CONNECTION, SERVERLESS };

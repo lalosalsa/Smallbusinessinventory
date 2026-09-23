@@ -205,3 +205,16 @@ export function noAccessScreen(onDone) {
     ]),
   ]);
 }
+
+/** The API answered, but with a reason it cannot run yet: a missing setting, an unreachable database. */
+export function startupErrorScreen(message, onRetry) {
+  return el('div.auth-shell', {}, [
+    el('div.auth-card.wide', {}, [
+      el('div.auth-brand', {}, [el('span.brand-mark', { text: '\u{1F4E6}' }), el('h1', { text: 'Inventory & Ordering' })]),
+      el('h2', { text: 'The server is not ready' }),
+      el('p.startup-error', { text: message }),
+      el('p.muted.small', { text: 'Once the setting is in place, deploy again (or restart the server) and try once more.' }),
+      el('button.btn', { text: 'Try again', onclick: onRetry }),
+    ]),
+  ]);
+}

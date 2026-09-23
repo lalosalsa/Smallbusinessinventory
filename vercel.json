@@ -1,0 +1,16 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "outputDirectory": "public",
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index"
+    }
+  ],
+  "functions": {
+    "api/index.js": {
+      "maxDuration": 30,
+      "includeFiles": "sql/**"
+    }
+  }
+}

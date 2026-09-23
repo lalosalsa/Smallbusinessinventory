@@ -1,0 +1,17 @@
+# Render blueprint: a plain long-running Node service, no serverless quirks.
+# New Blueprint -> pick this repo -> fill in the two secrets when prompted.
+services:
+  - type: web
+    name: inventory
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/auth/config
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: AUTH_SECRET
+        sync: false
+      - key: NODE_ENV
+        value: production

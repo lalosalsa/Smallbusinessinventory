@@ -60,9 +60,23 @@ function publicConfig() {
 /* ------------------------------------------------------------ local sign-in */
 
 const SECRET_FILE = process.env.AUTH_SECRET_FILE || path.join(__dirname, '..', 'data', '.auth-secret');
+const SERVERLESS = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NETLIFY);
+
+/**
+ * On a laptop or a single server a secret is generated once and kept in a file. On a
+ * serverless host there is no file that lasts and no single instance, so the secret
+ * has to be set as an environment variable or every instance would sign tokens the
+ * others reject.
+ */
+function assertSecretConfigured() {
+  if (MODE !== 'local' || process.env.AUTH_SECRET || !SERVERLESS) return;
+  throw new Error('AUTH_SECRET is not set. Add it under the project\'s Environment Variables '
+    + '(any long random string; "npm run secret" prints one), then redeploy.');
+}
 
 function secret() {
   if (process.env.AUTH_SECRET) return process.env.AUTH_SECRET;
+  assertSecretConfigured();
   try { return fs.readFileSync(SECRET_FILE, 'utf8').trim(); } catch {}
   const generated = crypto.randomBytes(32).toString('hex');
   fs.mkdirSync(path.dirname(SECRET_FILE), { recursive: true });
@@ -185,5 +199,5 @@ function unauthorised(message) { const e = new Error(message); e.status = 401; r
 
 module.exports = {
   authMode, publicConfig, verifyToken, forgetToken, registerLocalUser, loginLocal,
-  changeLocalPassword, normaliseEmail, hashPassword, verifyPassword,
+  changeLocalPassword, normaliseEmail, hashPassword, verifyPassword, assertSecretConfigured,
 };
